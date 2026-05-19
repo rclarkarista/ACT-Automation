@@ -1,0 +1,92 @@
+###############################################################################
+# ACT Topology: 2 spine, 4 leaf, 1 ZTP server
+#
+# Switch identity is pinned via serial_number + system_mac_address so devices
+# keep the same identity in CVaaS across topology redeploys. If you want to
+# share this file, change the "rclark-" prefix on each serial to your own.
+###############################################################################
+
+cvp:
+  username: cvpadmin
+  password: cvp123!
+
+generic:
+  username: root
+  password: arista
+  version: Ubuntu-22.04
+
+veos:
+  username: cvpadmin
+  password: cvp123!
+  version: 4.32.2F
+
+nodes:
+
+  ###########################################################################
+  # ZTP / DHCP / HTTP server
+  ###########################################################################
+  - ztp-server:
+      node_type: generic
+      ip_addr: 192.168.0.5/24
+
+  ###########################################################################
+  # Spines
+  ###########################################################################
+  - spine1:
+      node_type: veos
+      ip_addr: 192.168.0.11/24
+      serial_number: rclark-spine1
+      system_mac_address: 00:1c:73:00:01:01
+      ztp: true
+
+  - spine2:
+      node_type: veos
+      ip_addr: 192.168.0.12/24
+      serial_number: rclark-spine2
+      system_mac_address: 00:1c:73:00:01:02
+      ztp: true
+
+  ###########################################################################
+  # Leaves
+  ###########################################################################
+  - leaf1:
+      node_type: veos
+      ip_addr: 192.168.0.21/24
+      serial_number: rclark-leaf1
+      system_mac_address: 00:1c:73:00:02:01
+      ztp: true
+
+  - leaf2:
+      node_type: veos
+      ip_addr: 192.168.0.22/24
+      serial_number: rclark-leaf2
+      system_mac_address: 00:1c:73:00:02:02
+      ztp: true
+
+  - leaf3:
+      node_type: veos
+      ip_addr: 192.168.0.23/24
+      serial_number: rclark-leaf3
+      system_mac_address: 00:1c:73:00:02:03
+      ztp: true
+
+  - leaf4:
+      node_type: veos
+      ip_addr: 192.168.0.24/24
+      serial_number: rclark-leaf4
+      system_mac_address: 00:1c:73:00:02:04
+      ztp: true
+
+###############################################################################
+# Data-plane links (spine <-> leaf full mesh)
+###############################################################################
+links:
+  - connection: [spine1:Ethernet1, leaf1:Ethernet1]
+  - connection: [spine1:Ethernet2, leaf2:Ethernet1]
+  - connection: [spine1:Ethernet3, leaf3:Ethernet1]
+  - connection: [spine1:Ethernet4, leaf4:Ethernet1]
+
+  - connection: [spine2:Ethernet1, leaf1:Ethernet2]
+  - connection: [spine2:Ethernet2, leaf2:Ethernet2]
+  - connection: [spine2:Ethernet3, leaf3:Ethernet2]
+  - connection: [spine2:Ethernet4, leaf4:Ethernet2]
