@@ -2,17 +2,31 @@
 ###############################################################################
 # setup-ztp-server.sh
 #
-# Runs ON the ztp-server (Ubuntu generic node inside the ACT lab).
-# Installs and configures:
+# Runs ON the ztp-server (Ubuntu generic node inside the ACT lab), invoked
+# via `sudo` by bootstrap.sh. Installs and configures:
 #   - dnsmasq: DHCP for the 192.168.0.0/24 mgmt network, hands out
 #              bootfile-name (DHCP option 67) pointing at our bootstrap.py
 #   - python3 http.server: serves /var/www/ztp/bootstrap.py over HTTP:8080
 #
-# Expects /var/www/ztp/bootstrap.py to already be in place (uploaded by the
-# bootstrap.sh wrapper running on the operator's machine).
+# Usage: sudo setup-ztp-server.sh <path-to-bootstrap.py>
+#   The bootstrap.py is uploaded to a staging dir by bootstrap.sh (since the
+#   'arista' user can't write directly to /var/www/), and this script moves
+#   it into place.
 ###############################################################################
 
 set -euo pipefail
+
+if [[ $EUID -ne 0 ]]; then
+    echo "[ztp-server] ERROR: must be run as root (use sudo)." >&2
+    exit 1
+fi
+
+BOOTSTRAP_SRC="${1:-}"
+if [[ -z "${BOOTSTRAP_SRC}" || ! -f "${BOOTSTRAP_SRC}" ]]; then
+    echo "[ztp-server] ERROR: pass the path to bootstrap.py as the first arg." >&2
+    echo "             usage: sudo $0 /home/arista/ztp-staging/bootstrap.py" >&2
+    exit 1
+fi
 
 ZTP_DIR="/var/www/ztp"
 ZTP_FILE="bootstrap.py"
@@ -29,10 +43,9 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq dnsmasq python3
 
-if [[ ! -f "${ZTP_DIR}/${ZTP_FILE}" ]]; then
-    echo "[ztp-server] ERROR: ${ZTP_DIR}/${ZTP_FILE} not found. Upload it first." >&2
-    exit 1
-fi
+echo "[ztp-server] staging bootstrap.py into ${ZTP_DIR}..."
+mkdir -p "${ZTP_DIR}"
+install -m 0644 "${BOOTSTRAP_SRC}" "${ZTP_DIR}/${ZTP_FILE}"
 
 echo "[ztp-server] writing /etc/dnsmasq.conf..."
 cat > /etc/dnsmasq.conf <<EOF

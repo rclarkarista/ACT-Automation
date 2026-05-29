@@ -6,8 +6,8 @@ the same devices keep the same identity in CVaaS across topology redeploys.
 
 ## What it does
 
-1. You deploy an ACT topology (`topology.yml`) that pins every vEOS to a stable
-   `serial_number` and `system_mac_address`, with `ztp: true`.
+1. You deploy an ACT topology (`topology-<user>-<date>.yml`) that pins every
+   vEOS to a stable `serial_number` and `system_mac_address`, with `ztp: true`.
 2. You run `bootstrap.sh` on your laptop. It:
    - Prompts once for your CVaaS URL, CVaaS enrollment token, ztp-server IP,
      and a unique serial-number prefix (cached in `.config`).
@@ -18,14 +18,14 @@ the same devices keep the same identity in CVaaS across topology redeploys.
    the bootstrap URL) and a Python HTTP server hosting `bootstrap.py`.
 4. The vEOS switches boot in ZTP mode, DHCP from `ztp-server`, fetch
    `bootstrap.py`, and complete the CVaaS enrollment handshake. Because their
-   serial numbers are pinned in `topology.yml`, they appear in CVaaS with the
-   same identity every time.
+   serial numbers are pinned in the topology file, they appear in CVaaS with
+   the same identity every time.
 
 ## Files
 
 | File | Purpose |
 | ---- | ------- |
-| `topology.yml` | ACT topology — 2 spine, 4 leaf, 1 ZTP server. Edit the `rclark-` prefix to your own. |
+| `topology-rclark-2026-05-19.yml` | ACT topology — 2 spine, 4 leaf, 1 ZTP server. Edit the `rclark-` prefix to your own. **Filename must be unique across the ACT tenant** — convention is `topology-<user>-<YYYY-MM-DD>.yml`; bump the date when uploading a revision. |
 | `bootstrap.sh` | The thing you run. Prompts, caches, renders, deploys. |
 | `bootstrap/bootstrap.py.template` | Arista's official CVaaS bootstrap script, with `__CVAAS_URL__` / `__CVAAS_TOKEN__` placeholders. |
 | `bootstrap/setup-ztp-server.sh` | Runs on the ztp-server. Installs dnsmasq + http server. |
@@ -47,11 +47,12 @@ In ACT:
 ## Quickstart
 
 ```bash
-# 1. Edit topology.yml: change "rclark-" everywhere to your own unique prefix.
-#    (The script will warn you if you forget.)
+# 1. Copy topology-rclark-2026-05-19.yml -> topology-<you>-<today>.yml and
+#    edit it: change "rclark-" everywhere to your own unique prefix.
+#    (The script will warn you if the prefix doesn't match what you tell it.)
 
-# 2. Deploy the topology in the ACT UI. Note the ztp-server's mgmt IP
-#    (should be 192.168.0.5 as defined in topology.yml).
+# 2. Upload + deploy the topology in the ACT UI. Note the ztp-server's mgmt IP
+#    (should be 192.168.0.5 as defined in the topology file).
 
 # 3. Run the bootstrap:
 ./bootstrap.sh
@@ -68,15 +69,17 @@ In ACT:
 
 ## Redeploying
 
-When you change `topology.yml` and redeploy the lab, the switches come up
+When you change the topology and redeploy the lab, the switches come up
 clean — but because the serial numbers are pinned, CVaaS recognizes them as
-the same devices. Just rerun `./bootstrap.sh` (it will reuse the cached
-config, so you won't be prompted again).
+the same devices. Bump the date in the topology filename (ACT requires
+unique filenames across the tenant), re-upload, and rerun `./bootstrap.sh`
+(it will reuse the cached config, so you won't be prompted again).
 
 ## Sharing this with a coworker
 
 1. They clone the repo.
-2. They edit `topology.yml` and change the `rclark-` prefix to their own.
+2. They copy the topology file to `topology-<them>-<today>.yml` and change
+   the `rclark-` serial prefix to their own.
 3. They run `./bootstrap.sh` and paste in their own CVaaS token.
 
 No edits to the bootstrap scripts needed.
@@ -85,5 +88,5 @@ No edits to the bootstrap scripts needed.
 
 - Drive ACT topology deploy / undeploy from the API directly (in progress
   with a coworker's Python tooling).
-- Optional: auto-generate `topology.yml` from AVD configs (see
+- Optional: auto-generate the topology file from AVD configs (see
   [emilarista/act_topgen](https://github.com/emilarista/act_topgen)).
