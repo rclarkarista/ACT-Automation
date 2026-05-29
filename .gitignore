@@ -1,9 +1,6 @@
 # Cached config (contains your CVaaS enrollment token)
 .config
 
-# Rendered bootstrap.py — contains your CVaaS enrollment token
-bootstrap/bootstrap.py
-
 # macOS noise
 .DS_Store
 

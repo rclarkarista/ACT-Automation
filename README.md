@@ -1,92 +1,140 @@
-# ACT + CVaaS bootstrap automation
+# ACT + CVaaS onboarding helper
 
-A small, shareable workflow for spinning up an Arista Cloud Test (ACT) lab and
-auto-registering its vEOS switches with CloudVision as a Service (CVaaS) — so
-the same devices keep the same identity in CVaaS across topology redeploys.
+A small, shareable toolkit for spinning up an Arista Cloud Test (ACT) lab and
+onboarding its vEOS switches to CloudVision as a Service (CVaaS) — so the
+same devices keep the same identity in CVaaS across topology redeploys.
 
-## What it does
+Two scripts, run in order:
 
-1. You deploy an ACT topology (`topology-<user>-<date>.yml`) that pins every
-   vEOS to a stable `serial_number` and `system_mac_address`, with `ztp: true`.
-2. You run `bootstrap.sh` on your laptop. It:
-   - Prompts once for your CVaaS URL, CVaaS enrollment token, ztp-server IP,
-     and a unique serial-number prefix (cached in `.config`).
-   - Renders `bootstrap/bootstrap.py.template` with your token.
-   - SCPs the rendered `bootstrap.py` to the lab's `ztp-server` (a generic
-     Ubuntu node) and runs `setup-ztp-server.sh` there.
-3. `setup-ztp-server.sh` installs `dnsmasq` (DHCP with option 67 pointing at
-   the bootstrap URL) and a Python HTTP server hosting `bootstrap.py`.
-4. The vEOS switches boot in ZTP mode, DHCP from `ztp-server`, fetch
-   `bootstrap.py`, and complete the CVaaS enrollment handshake. Because their
-   serial numbers are pinned in the topology file, they appear in CVaaS with
-   the same identity every time.
+| Step | Script | What it does |
+| ---- | ------ | ------------ |
+| 1    | `./generate.sh` | Interactively generates a topology YAML with pinned serials + MACs. |
+| 2    | `./onboard.sh`  | Finds your Running lab via the ACT API and SSH-pastes the TerminAttr onboarding snippet to every vEOS switch. |
+
+Between the two: upload + deploy the generated topology in the ACT UI.
+
+## How it works
+
+1. `generate.sh` writes a topology where every switch has a stable
+   `serial_number` and `system_mac_address`. CVaaS identifies devices by
+   serial, so the same topology always produces the same set of devices in
+   CVaaS — even after you redeploy.
+2. You upload + deploy the topology in the ACT UI.
+3. `onboard.sh` queries the ACT API for your Running labs, lets you pick
+   one if there's more than one, and SSH-pastes the TerminAttr onboarding
+   snippet (with your CVaaS token inlined) to every vEOS device in that
+   lab. They appear in CVaaS Inventory within ~1 minute.
+
+No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 
 ## Files
 
 | File | Purpose |
 | ---- | ------- |
-| `topology-rclark-2026-05-19.yml` | ACT topology — 2 spine, 4 leaf, 1 ZTP server. Edit the `rclark-` prefix to your own. **Filename must be unique across the ACT tenant** — convention is `topology-<user>-<YYYY-MM-DD>.yml`; bump the date when uploading a revision. |
-| `bootstrap.sh` | The thing you run. Prompts, caches, renders, deploys. |
-| `bootstrap/bootstrap.py.template` | Arista's official CVaaS bootstrap script, with `__CVAAS_URL__` / `__CVAAS_TOKEN__` placeholders. |
-| `bootstrap/setup-ztp-server.sh` | Runs on the ztp-server. Installs dnsmasq + http server. |
-| `.config` | Auto-generated cache of your answers. **gitignored.** Delete to re-prompt. |
+| `generate.sh` | Interactive topology generator. Always asks for a serial prefix; caches spine/leaf counts + EOS version. |
+| `onboard.sh`  | Lists your Running labs and onboards every vEOS switch to CVaaS. |
+| `_common.sh`  | Shared helpers (prompt/cache/tool-check). Sourced by both scripts; don't run directly. |
+| `topology-<prefix>-<YYYY-MM-DD>.yml` | Generated topology. Filename must be unique across the ACT tenant — `generate.sh` enforces the convention. |
+| `.config`     | Auto-generated cache of your answers. **gitignored.** Delete to re-prompt. |
 
 ## Prerequisites
 
 On your laptop:
-- `bash`, `ssh`, `scp`, `sshpass` (`brew install hudochenkov/sshpass/sshpass`)
+- `bash`, `curl`, `jq`, `sshpass`. Install the non-defaults with:
+  ```bash
+  brew install jq hudochenkov/sshpass/sshpass
+  # bash + curl ship with macOS
+  ```
+
+In ACT:
+- Permission to upload + deploy a topology.
+- Your **ACT username** (e.g. `firstname.lastname`).
+- An **ACT API key** from your ACT user profile.
 
 In CVaaS:
 - An **enrollment token** from `Devices → Inventory → Add Devices →
-  Onboard with Token`. Single reusable token is fine.
-
-In ACT:
-- Permission to deploy a topology. (Manual via UI for now; API integration
-  is planned for v2.)
+  Onboard with Token`. Single reusable token is fine — it works for every
+  device in the topology.
 
 ## Quickstart
 
 ```bash
-# 1. Copy topology-rclark-2026-05-19.yml -> topology-<you>-<today>.yml and
-#    edit it: change "rclark-" everywhere to your own unique prefix.
-#    (The script will warn you if the prefix doesn't match what you tell it.)
+# 1. Generate a topology.
+./generate.sh
+#   Serial prefix (e.g. bsmith): rclark
+#   Number of spines [2]:
+#   Number of leaves [4]:
+#   EOS version [4.32.2F]:
+#   Continue? [y/N] y
+#   Wrote topology-rclark-2026-05-21.yml
 
-# 2. Upload + deploy the topology in the ACT UI. Note the ztp-server's mgmt IP
-#    (should be 192.168.0.5 as defined in the topology file).
+# 2. Upload + deploy that file via the ACT UI. Wait for the lab to reach Running.
 
-# 3. Run the bootstrap:
-./bootstrap.sh
+# 3. Onboard every switch to CVaaS.
+./onboard.sh
+#   ACT tenant [ce]:
+#   ACT username (e.g. firstname.lastname): ryan.clark
+#   ACT API key: ****  (36 chars)
+#   CVaaS enrollment token: ****  (944 chars)
+#   ...
+#   Lab: rclark-claude-test
+#   Will paste TerminAttr config to 6 vEOS device(s):
+#     spine1        10.18.131.218
+#     ...
+#   Continue? [y/N] y
+#   Pasting TerminAttr snippet to each switch...
+#     spine1        10.18.131.218     ok
+#     ...
 
-# First run will prompt for:
-#   CVaaS URL              e.g. www.arista.io
-#   CVaaS enrollment token (hidden input)
-#   ztp-server IP          192.168.0.5
-#   Serial-number prefix   e.g. rclark
-
-# 4. Watch CVaaS → Inventory. Devices will appear under your prefixed
-#    serial numbers (rclark-spine1, rclark-leaf1, ...).
+# 4. Watch CVaaS -> Inventory. Devices appear under their pinned serials
+#    (rclark-spine1, rclark-leaf1, ...) within ~1 minute each.
 ```
 
 ## Redeploying
 
-When you change the topology and redeploy the lab, the switches come up
-clean — but because the serial numbers are pinned, CVaaS recognizes them as
-the same devices. Bump the date in the topology filename (ACT requires
-unique filenames across the tenant), re-upload, and rerun `./bootstrap.sh`
-(it will reuse the cached config, so you won't be prompted again).
+When you want to change the topology:
+
+1. Re-run `./generate.sh` — bump spine/leaf counts as needed. The new file
+   has today's date in its name, so it won't collide with previous uploads.
+2. Upload + deploy in the ACT UI. (Leave the old lab undeployed/deleted to
+   avoid duplicates.)
+3. Run `./onboard.sh` and pick the new lab from the list.
+
+Because the serials are pinned to the prefix, CVaaS recognizes the devices
+as the same ones from before. State / dashboards / studios / labels all
+carry over.
 
 ## Sharing this with a coworker
 
-1. They clone the repo.
-2. They copy the topology file to `topology-<them>-<today>.yml` and change
-   the `rclark-` serial prefix to their own.
-3. They run `./bootstrap.sh` and paste in their own CVaaS token.
+1. Clone the repo.
+2. Run `./generate.sh` — it forces them to enter their own serial prefix
+   (the `(e.g. bsmith)` hint means it's never cached or shared).
+3. Run `./onboard.sh` — they enter their own ACT and CVaaS creds when
+   prompted.
 
-No edits to the bootstrap scripts needed.
+No edits to either script needed.
+
+## Why TerminAttr token-secure auth instead of the bootstrap.py flow
+
+CVaaS supports two onboarding paths:
+
+- **`bootstrap.py`**: an Arista-provided Python script that does a
+  multi-step enrollment dance (token → device cert exchange → device-specific
+  bootstrap → registration). Requires the device to be reachable to a
+  bootstrap-script host during ZTP.
+- **TerminAttr `token-secure` auth**: TerminAttr does the same enrollment
+  internally on first connect, using just the enrollment token in a file.
+  No ZTP, no DHCP, no HTTP server, no per-device bootstrap host — you just
+  give the daemon a token and a CVaaS endpoint and it figures it out.
+
+For an ACT lab where you have SSH access to every device the moment it
+boots, the second path is dramatically simpler.
 
 ## v2 / TODO
 
 - Drive ACT topology deploy / undeploy from the API directly (in progress
-  with a coworker's Python tooling).
-- Optional: auto-generate the topology file from AVD configs (see
+  with a coworker's Python tooling) — would collapse steps 2 and 3 above.
+- Auto-generate the topology file from AVD configs (see
   [emilarista/act_topgen](https://github.com/emilarista/act_topgen)).
+- Parallelize the auto-paste ssh loop (currently serial — fine for ~6
+  switches, slow for larger topologies).

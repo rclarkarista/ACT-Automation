@@ -1,180 +1,200 @@
 #!/usr/bin/env bash
 ###############################################################################
-# bootstrap.sh
+# onboard.sh
 #
-# Operator-side wrapper. After you've deployed your ACT topology (UI for now,
-# API later), run this from your laptop to:
-#   1. Prompt once for CVaaS URL, CVaaS enrollment token, ztp-server IP, and
-#      a unique serial-number prefix. Values are cached in .config so reruns
-#      are non-interactive.
-#   2. Render bootstrap.py.template -> bootstrap/bootstrap.py with your token.
-#   3. SCP it to the ztp-server, then SSH in and run setup-ztp-server.sh,
-#      which installs dnsmasq + python http server.
+# Onboards every vEOS switch in one of your Running ACT labs to CVaaS via
+# TerminAttr.
 #
-# After this runs, power-cycle (or just wait — vEOS boots into ZTP) the
-# switches; they DHCP, fetch bootstrap.py, register themselves with CVaaS
-# using the pinned serial numbers from topology.yml.
+# Workflow:
+#   1. Prompts (once, cached in .config) for:
+#        ACT_TENANT, ACT_USER, ACT_API_KEY
+#        CVAAS_TOKEN
+#   2. Lists your Running labs via the ACT API.
+#        - 0 running -> tells you to deploy/start one in the ACT UI.
+#        - 1 running -> uses it.
+#        - 2+ running -> prompts you to pick.
+#   3. SSH-pastes the TerminAttr onboarding snippet to every vEOS device in
+#      the chosen lab. They appear in CVaaS Inventory within ~1 minute.
+#
+# Because each switch's serial_number is pinned in the topology file (see
+# generate.sh), devices keep the same CVaaS identity across redeploys.
 ###############################################################################
 
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${PROJECT_DIR}/.config"
-TEMPLATE="${PROJECT_DIR}/bootstrap/bootstrap.py.template"
-RENDERED="${PROJECT_DIR}/bootstrap/bootstrap.py"
-SETUP_SCRIPT="${PROJECT_DIR}/bootstrap/setup-ztp-server.sh"
+# shellcheck source=_common.sh
+source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 
-ZTP_USER="arista"
-ZTP_PASS="arista"   # default ACT generic-node creds (per ACT user guide)
-REMOTE_STAGING="/home/arista/ztp-staging"   # writable by 'arista' user
-REMOTE_WEB_DIR="/var/www/ztp"               # final location; setup script moves files here w/ sudo
+DEFAULT_ACT_TENANT="ce"
 
 ###############################################################################
-# helpers
+# load cached config + prompt for anything missing
 ###############################################################################
-require_cmd() {
-    command -v "$1" >/dev/null 2>&1 || {
-        echo "ERROR: '$1' not installed. Please install it and rerun." >&2
-        exit 1
-    }
-}
-
-prompt() {
-    # prompt <var-name> <human-label> [secret]
-    local __var=$1 label=$2 secret=${3:-}
-    local existing="${!__var:-}"
-    if [[ -n "${existing}" ]]; then
-        echo "  ${label}: using cached value"
-        return
-    fi
-    local val
-    if [[ "${secret}" == "secret" ]]; then
-        read -r -s -p "  ${label}: " val; echo
-    else
-        read -r -p "  ${label}: " val
-    fi
-    printf -v "${__var}" '%s' "${val}"
-}
-
-save_config() {
-    cat > "${CONFIG_FILE}" <<EOF
-# Cached by bootstrap.sh. Delete this file to be re-prompted.
-CVAAS_URL="${CVAAS_URL}"
-CVAAS_TOKEN="${CVAAS_TOKEN}"
-ZTP_SERVER_IP="${ZTP_SERVER_IP}"
-SERIAL_PREFIX="${SERIAL_PREFIX}"
-EOF
-    chmod 600 "${CONFIG_FILE}"
-}
-
-###############################################################################
-# pre-flight
-###############################################################################
-require_cmd ssh
-require_cmd scp
-require_cmd sshpass   # used so we don't have to type the lab password 3x
-
-###############################################################################
-# load cached config (if any)
-###############################################################################
-CVAAS_URL=""
+ACT_TENANT=""
+ACT_USER=""
+ACT_API_KEY=""
 CVAAS_TOKEN=""
-ZTP_SERVER_IP=""
-SERIAL_PREFIX=""
 
-if [[ -f "${CONFIG_FILE}" ]]; then
-    # shellcheck disable=SC1090
-    source "${CONFIG_FILE}"
-    echo "Loaded cached config from .config (delete it to re-prompt)."
-fi
+load_config
 
-###############################################################################
-# prompt for anything missing
-###############################################################################
 echo
-echo "Configuration:"
-prompt CVAAS_URL      "CVaaS URL (e.g. www.arista.io)"
-prompt CVAAS_TOKEN    "CVaaS enrollment token"               secret
-prompt ZTP_SERVER_IP  "ztp-server IP (from ACT lab, mgmt iface)"
-prompt SERIAL_PREFIX  "Serial-number prefix (your topology.yml uses this)"
+echo "ACT API access:"
+prompt ACT_TENANT  "ACT tenant"                              "${DEFAULT_ACT_TENANT}"
+prompt ACT_USER    "ACT username (e.g. firstname.lastname)"
+prompt ACT_API_KEY "ACT API key"                              secret
+
+echo
+echo "CVaaS onboarding:"
+prompt CVAAS_TOKEN "CVaaS enrollment token"                   secret
+
+for v in ACT_TENANT ACT_USER ACT_API_KEY CVAAS_TOKEN; do
+    if [[ -z "${!v}" ]]; then
+        echo "ERROR: ${v} is required and cannot be blank." >&2
+        exit 1
+    fi
+done
 
 save_config
 echo
 
 ###############################################################################
-# sanity-check the topology file uses the same prefix
-#   (topology files are date-suffixed for ACT-tenant uniqueness, e.g.
-#    topology-rclark-2026-05-19.yml — so we glob rather than hardcode a name)
+# build the EOS snippet (used by the auto-paste loop, and printed verbatim
+# for any device that fails so you can finish by hand)
 ###############################################################################
-shopt -s nullglob
-TOPO_FILES=( "${PROJECT_DIR}"/topology*.yml )
-shopt -u nullglob
-
-if (( ${#TOPO_FILES[@]} == 0 )); then
-    echo "WARNING: no topology*.yml found in ${PROJECT_DIR}. Skipping prefix check."
-elif ! grep -q "serial_number: ${SERIAL_PREFIX}-" "${TOPO_FILES[@]}" 2>/dev/null; then
-    echo "WARNING: no topology*.yml contains 'serial_number: ${SERIAL_PREFIX}-...'."
-    echo "         Edit your topology file so switch serials are prefixed with '${SERIAL_PREFIX}-',"
-    echo "         otherwise devices will register under different IDs than you expect."
-    read -r -p "Continue anyway? [y/N] " ans
-    [[ "${ans,,}" == "y" ]] || exit 1
-fi
-
-###############################################################################
-# render bootstrap.py from template
-###############################################################################
-echo "Rendering bootstrap.py from template..."
-# Use a sed delimiter unlikely to appear in tokens/urls.
-sed \
-    -e "s|__CVAAS_URL__|${CVAAS_URL}|g" \
-    -e "s|__CVAAS_TOKEN__|${CVAAS_TOKEN}|g" \
-    "${TEMPLATE}" > "${RENDERED}"
-chmod 600 "${RENDERED}"
+SNIPPET=$(cat <<EOSPASTE
+enable
+bash
+echo "${CVAAS_TOKEN}" > /tmp/cv-onboarding-token
+exit
+configure
+daemon TerminAttr
+   exec /usr/bin/TerminAttr -smashexcludes=ale,flexCounter,hardware,kni,pulse,strata -cvaddr=apiserver.arista.io:443 -cvauth=token-secure,/tmp/cv-onboarding-token -taillogs
+   shutdown
+   no shutdown
+end
+write
+EOSPASTE
+)
 
 ###############################################################################
-# check ztp-server reachability — also serves as "is your lab running?" probe
+# look up Running labs and pick one
 ###############################################################################
-echo "Checking ztp-server (${ZTP_SERVER_IP}) reachability..."
-if ! sshpass -p "${ZTP_PASS}" ssh \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o ConnectTimeout=5 \
-        "${ZTP_USER}@${ZTP_SERVER_IP}" "true" 2>/dev/null; then
-    echo "ERROR: cannot SSH to ${ZTP_USER}@${ZTP_SERVER_IP}." >&2
-    echo "       Is the ACT lab deployed and the ztp-server reachable?" >&2
+require_tools curl jq sshpass
+
+API_BASE="https://${ACT_TENANT}.act.arista.com/rest/v1"
+
+echo "Logging into ACT (${API_BASE})..."
+LOGIN_RESP=$(curl -sk "${API_BASE}/auth/login" \
+    -H 'Content-Type: application/json' \
+    -d "{\"api_key\":\"${ACT_API_KEY}\"}")
+TOKEN=$(jq -r '.token // empty' <<< "${LOGIN_RESP}")
+if [[ -z "${TOKEN}" ]]; then
+    echo "ERROR: ACT login failed. Response:" >&2
+    echo "${LOGIN_RESP}" >&2
     exit 1
 fi
 
+echo "Listing Running labs for user=${ACT_USER}..."
+LABS_RESP=$(curl -sk "${API_BASE}/labs?user=${ACT_USER}&pageSize=200" \
+    -H "Authorization: Bearer ${TOKEN}")
+
+RUNNING_IDS=()
+RUNNING_NAMES=()
+RUNNING_TOPOS=()
+while IFS=$'\t' read -r id name topo; do
+    [[ -z "${id}" ]] && continue
+    RUNNING_IDS+=("${id}")
+    RUNNING_NAMES+=("${name}")
+    RUNNING_TOPOS+=("${topo}")
+done < <(jq -r '.result[] | select(.state == 2) | "\(.id)\t\(.name)\t\(.topology_definition)"' \
+    <<< "${LABS_RESP}")
+
+count=${#RUNNING_IDS[@]}
+if (( count == 0 )); then
+    echo
+    echo "No Running labs found for user=${ACT_USER}."
+    echo "Deploy or start a lab in the ACT UI, then re-run this script."
+    exit 1
+fi
+
+if (( count == 1 )); then
+    LAB_ID="${RUNNING_IDS[0]}"
+    LAB_NAME="${RUNNING_NAMES[0]}"
+    echo "Found 1 Running lab: ${LAB_NAME}  (${LAB_ID})"
+else
+    echo
+    echo "Your Running labs:"
+    for i in "${!RUNNING_IDS[@]}"; do
+        printf "  %2d. %-50s  topology=%s\n" \
+            $((i+1)) "${RUNNING_NAMES[i]}" "${RUNNING_TOPOS[i]}"
+    done
+    echo
+    while true; do
+        read -r -p "Pick a lab [1-${count}]: " choice
+        if [[ "${choice}" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
+            break
+        fi
+        echo "  Invalid choice."
+    done
+    LAB_ID="${RUNNING_IDS[choice-1]}"
+    LAB_NAME="${RUNNING_NAMES[choice-1]}"
+fi
+
 ###############################################################################
-# upload + run
+# fetch the lab's devices and confirm before pasting
 ###############################################################################
-echo "Uploading bootstrap.py and setup-ztp-server.sh..."
-sshpass -p "${ZTP_PASS}" ssh \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "${ZTP_USER}@${ZTP_SERVER_IP}" "mkdir -p ${REMOTE_STAGING}"
+LAB_RESP=$(curl -sk "${API_BASE}/labs/${LAB_ID}" \
+    -H "Authorization: Bearer ${TOKEN}")
 
-sshpass -p "${ZTP_PASS}" scp \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "${RENDERED}"       "${ZTP_USER}@${ZTP_SERVER_IP}:${REMOTE_STAGING}/bootstrap.py"
-sshpass -p "${ZTP_PASS}" scp \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "${SETUP_SCRIPT}"   "${ZTP_USER}@${ZTP_SERVER_IP}:${REMOTE_STAGING}/setup-ztp-server.sh"
+DEVICES=$(jq -r '.devices.veos[]? |
+    "\(.hostname)\t\(.internal_ip)\t\(.shell_logins[0].username)\t\(.shell_logins[0].password)"' \
+    <<< "${LAB_RESP}")
+if [[ -z "${DEVICES}" ]]; then
+    echo "ERROR: no vEOS devices found in lab ${LAB_NAME} (${LAB_ID})." >&2
+    exit 1
+fi
 
-echo "Running setup-ztp-server.sh on the ztp-server (via sudo)..."
-sshpass -p "${ZTP_PASS}" ssh \
-    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-    "${ZTP_USER}@${ZTP_SERVER_IP}" \
-    "chmod +x ${REMOTE_STAGING}/setup-ztp-server.sh && sudo ${REMOTE_STAGING}/setup-ztp-server.sh ${REMOTE_STAGING}/bootstrap.py"
+dev_count=$(grep -c . <<< "${DEVICES}")
+echo
+echo "Lab: ${LAB_NAME}"
+echo "Will paste TerminAttr config to ${dev_count} vEOS device(s):"
+while IFS=$'\t' read -r host ip _ _; do
+    printf "  %-12s  %s\n" "${host}" "${ip}"
+done <<< "${DEVICES}"
+echo
+read -r -p "Continue? [y/N] " ans
+case "${ans}" in [Yy]*) ;; *) echo "Aborted."; exit 1 ;; esac
 
-cat <<EOF
+###############################################################################
+# paste the snippet to each device
+###############################################################################
+echo
+echo "Pasting TerminAttr snippet to each switch..."
+echo "------------------------------------------------------------------------"
+FAILED=()
+while IFS=$'\t' read -r host ip user pw; do
+    printf "  %-12s  %-16s  " "${host}" "${ip}"
+    if sshpass -p "${pw}" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR \
+            -o ConnectTimeout=10 \
+            "${user}@${ip}" <<< "${SNIPPET}" >/dev/null 2>&1; then
+        echo "ok"
+    else
+        echo "FAILED"
+        FAILED+=("${host}")
+    fi
+done <<< "${DEVICES}"
+echo "------------------------------------------------------------------------"
 
-Done.
+if (( ${#FAILED[@]} > 0 )); then
+    echo
+    echo "Some switches failed: ${FAILED[*]}"
+    echo "Paste this snippet into them manually:"
+    echo "${SNIPPET}"
+    exit 1
+fi
 
-Next:
-  - Switches in ZTP mode will DHCP from the ztp-server, fetch bootstrap.py,
-    and register with CVaaS at ${CVAAS_URL}.
-  - In CVaaS, you should see devices appear under Inventory with the
-    serial numbers from topology.yml (prefix: ${SERIAL_PREFIX}-).
-  - If you redeploy the topology, just rerun this script — same serials,
-    same CVaaS identity.
-EOF
+echo
+echo "Done. Devices should appear in CVaaS Inventory within ~1 minute."

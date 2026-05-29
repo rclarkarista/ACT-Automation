@@ -1,20 +1,18 @@
 ###############################################################################
-# ACT Topology: 2 spine, 4 leaf, 1 ZTP server
+# ACT Topology: 2 spine, 4 leaf
 #
 # Filename convention: topology-<user>-<YYYY-MM-DD>.yml
 #   ACT requires topology filenames to be unique across the tenant, so suffix
-#   with your prefix and the date. Bump the date (or rename + re-upload) when
-#   you push a revision so you don't collide with the previous version.
+#   with your prefix and the date. Bump the date when uploading a revision.
 #
 # Switch identity is pinned via serial_number + system_mac_address so devices
 # keep the same identity in CVaaS across topology redeploys. If you want to
 # share this file, change the "rclark-" prefix on each serial to your own.
+#
+# ztp: false on every switch — devices boot with the default config
+# (cvpadmin / cvp123!) so you can SSH in immediately to paste the CVaaS
+# onboarding snippet that bootstrap.sh generates.
 ###############################################################################
-
-generic:
-  username: arista
-  password: arista
-  version: ubuntu-2204-lts
 
 veos:
   username: cvpadmin
@@ -24,28 +22,21 @@ veos:
 nodes:
 
   ###########################################################################
-  # ZTP / DHCP / HTTP server
-  ###########################################################################
-  - ztp-server:
-      node_type: generic
-      ip_addr: 192.168.0.5/24
-
-  ###########################################################################
   # Spines
   ###########################################################################
   - spine1:
       node_type: veos
       ip_addr: 192.168.0.11/24
-      serial_number: rclark-spine1
+      serial_number: rdc-spine1
       system_mac_address: 00:1c:73:00:01:01
-      ztp: true
+      ztp: false
 
   - spine2:
       node_type: veos
       ip_addr: 192.168.0.12/24
-      serial_number: rclark-spine2
+      serial_number: rdc-spine2
       system_mac_address: 00:1c:73:00:01:02
-      ztp: true
+      ztp: false
 
   ###########################################################################
   # Leaves
@@ -53,30 +44,30 @@ nodes:
   - leaf1:
       node_type: veos
       ip_addr: 192.168.0.21/24
-      serial_number: rclark-leaf1
+      serial_number: rdc-leaf1
       system_mac_address: 00:1c:73:00:02:01
-      ztp: true
+      ztp: false
 
   - leaf2:
       node_type: veos
       ip_addr: 192.168.0.22/24
-      serial_number: rclark-leaf2
+      serial_number: rdc-leaf2
       system_mac_address: 00:1c:73:00:02:02
-      ztp: true
+      ztp: false
 
   - leaf3:
       node_type: veos
       ip_addr: 192.168.0.23/24
-      serial_number: rclark-leaf3
+      serial_number: rdc-leaf3
       system_mac_address: 00:1c:73:00:02:03
-      ztp: true
+      ztp: false
 
   - leaf4:
       node_type: veos
       ip_addr: 192.168.0.24/24
-      serial_number: rclark-leaf4
+      serial_number: rdc-leaf4
       system_mac_address: 00:1c:73:00:02:04
-      ztp: true
+      ztp: false
 
 ###############################################################################
 # Data-plane links (spine <-> leaf full mesh)
