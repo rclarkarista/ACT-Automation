@@ -55,6 +55,37 @@ extract_veos_password() {
 }
 
 ###############################################################################
+# extract_veos_hostnames — read a YAML topology on stdin, print one hostname
+# per line for every node with `node_type: veos`. Skips commented-out nodes
+# and ignores any block that isn't under `nodes:`. Used to filter the ACT
+# API's device list down to actual EOS devices (so we don't try to SSH and
+# paste a token into a CVP / Linux / third-party node that happens to be
+# returned by the API under .devices.veos[]).
+###############################################################################
+extract_veos_hostnames() {
+    awk '
+        BEGIN { in_nodes=0; current=""; type="" }
+        /^nodes:/                  { in_nodes=1; next }
+        in_nodes && /^[a-zA-Z]/ {
+            if (type == "veos" && current != "") print current
+            in_nodes=0; current=""; type=""
+        }
+        in_nodes && /^  - [a-zA-Z]/ {
+            if (type == "veos" && current != "") print current
+            sub(/^  - /, ""); sub(/:.*$/, "")
+            current=$0; type=""
+        }
+        in_nodes && /^[[:space:]]+node_type:[[:space:]]+/ {
+            sub(/^[[:space:]]+node_type:[[:space:]]+/, "")
+            sub(/[[:space:]]*#.*$/, "")
+            gsub(/[[:space:]]/, "")
+            type=$0
+        }
+        END { if (type == "veos" && current != "") print current }
+    '
+}
+
+###############################################################################
 # ssh_eos <ip> — open an EOS CLI session on the device. Reads CLI commands
 # from stdin; caller redirects stdout/stderr.
 ###############################################################################
@@ -194,35 +225,73 @@ if [[ -z "${DEVICES}" ]]; then
 fi
 
 ###############################################################################
-# resolve the EOS password from the lab's topology YAML.
-# Sources tried in order:
-#   1. local file at ${PROJECT_DIR}/<topology_definition>  (fastest, no API)
-#   2. ACT API /topologies/<topology_definition>           (works for shared labs)
-#   3. ${EOS_PASS_DEFAULT}                                  (cvp123!)
+# pull the topology YAML once and use it for two things:
+#   1. resolve the EOS password from the `veos:` block
+#   2. filter ${DEVICES} down to only nodes with `node_type: veos`
+#      (so CVP / Linux / third-party nodes never get a token paste attempt)
+#
+# YAML sources tried in order:
+#   - local file at ${PROJECT_DIR}/<topology_definition>  (fastest, no API)
+#   - ACT API /topologies/<topology_definition>           (works for shared labs)
 ###############################################################################
 TOPO_NAME=$(jq -r '.topology_definition // empty' <<< "${LAB_RESP}")
 [[ -z "${TOPO_NAME}" ]] && TOPO_NAME="${RUNNING_TOPOS[choice-1]:-}"
 
+TOPO_YAML=""
+TOPO_SOURCE=""
 if [[ -n "${TOPO_NAME}" && -f "${PROJECT_DIR}/${TOPO_NAME}" ]]; then
-    EOS_PASS=$(extract_veos_password < "${PROJECT_DIR}/${TOPO_NAME}")
-    [[ -n "${EOS_PASS}" ]] && echo "EOS password: from local ${TOPO_NAME}"
-fi
-
-if [[ -z "${EOS_PASS}" && -n "${TOPO_NAME}" ]]; then
+    TOPO_YAML=$(cat "${PROJECT_DIR}/${TOPO_NAME}")
+    TOPO_SOURCE="local ${TOPO_NAME}"
+elif [[ -n "${TOPO_NAME}" ]]; then
     # ACT API endpoint is a best-guess; some tenants wrap YAML in JSON.
     TOPO_RESP=$(curl -sk "${API_BASE}/topologies/${TOPO_NAME}" \
-        -H "Authorization: Bearer ${TOKEN}" 2>/dev/null)
+        -H "Authorization: Bearer ${TOKEN}" 2>/dev/null || true)
     if [[ -n "${TOPO_RESP}" ]]; then
         content=$(jq -r '.content // .data // empty' <<< "${TOPO_RESP}" 2>/dev/null || true)
         [[ -z "${content}" || "${content}" == "null" ]] && content="${TOPO_RESP}"
-        EOS_PASS=$(extract_veos_password <<< "${content}")
-        [[ -n "${EOS_PASS}" ]] && echo "EOS password: from ACT API (${TOPO_NAME})"
+        if [[ -n "${content}" ]]; then
+            TOPO_YAML="${content}"
+            TOPO_SOURCE="ACT API (${TOPO_NAME})"
+        fi
     fi
 fi
 
-if [[ -z "${EOS_PASS}" ]]; then
+# EOS password
+if [[ -n "${TOPO_YAML}" ]]; then
+    EOS_PASS=$(extract_veos_password <<< "${TOPO_YAML}")
+fi
+if [[ -n "${EOS_PASS}" ]]; then
+    echo "EOS password: from ${TOPO_SOURCE}"
+else
     EOS_PASS="${EOS_PASS_DEFAULT}"
     echo "EOS password: could not auto-detect from topology; defaulting to ${EOS_PASS_DEFAULT}"
+fi
+
+# Filter ${DEVICES} to only nodes the topology declares as `node_type: veos`.
+# We only apply this filter when we actually have the YAML — otherwise we trust
+# the API's `.devices.veos[]` filter as-is rather than dropping everything.
+if [[ -n "${TOPO_YAML}" ]]; then
+    VEOS_NAMES=$(extract_veos_hostnames <<< "${TOPO_YAML}")
+    if [[ -n "${VEOS_NAMES}" ]]; then
+        SKIPPED=()
+        NEW_DEVICES=""
+        while IFS=$'\t' read -r host ip; do
+            [[ -z "${host}" ]] && continue
+            if grep -Fxq "${host}" <<< "${VEOS_NAMES}"; then
+                NEW_DEVICES+="${host}"$'\t'"${ip}"$'\n'
+            else
+                SKIPPED+=("${host}")
+            fi
+        done <<< "${DEVICES}"
+        if (( ${#SKIPPED[@]} > 0 )); then
+            echo "Skipping ${#SKIPPED[@]} non-EOS device(s) per topology: ${SKIPPED[*]}"
+        fi
+        DEVICES="${NEW_DEVICES%$'\n'}"
+        if [[ -z "${DEVICES}" ]]; then
+            echo "ERROR: no EOS devices remain after topology filter." >&2
+            exit 1
+        fi
+    fi
 fi
 
 dev_count=$(grep -c . <<< "${DEVICES}")
