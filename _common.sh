@@ -71,6 +71,32 @@ prompt() {
 }
 
 ###############################################################################
+# prompt_with_current <var-name> <human-label> [hardcoded-default]
+#   Like prompt(), but never silently uses a cached value. Always re-asks,
+#   with the current value of the var (if any) as the default-of-defaults,
+#   falling back to the hardcoded default if the var is empty.
+#
+#   Usage shape:
+#     # var has value "3" → asks "Number of spines [3]: " (Enter keeps 3)
+#     # var empty + default 2 → asks "Number of spines [2]: " (Enter picks 2)
+#     # var + default both empty → required free-form input
+#
+#   Intended for "modify an existing thing" flows where the user should see
+#   what's there and be able to change it inline, instead of being skipped.
+###############################################################################
+prompt_with_current() {
+    local __var=$1 label=$2 hardcoded_default=${3:-}
+    local current="${!__var:-}"
+    local default="${current:-${hardcoded_default}}"
+    local hint=""
+    [[ -n "${default}" ]] && hint=" [${default}]"
+    local val=""
+    read -r -p "  ${label}${hint}: " val
+    [[ -z "${val}" && -n "${default}" ]] && val="${default}"
+    printf -v "${__var}" '%s' "${val}"
+}
+
+###############################################################################
 # load_config — source .config if it exists, set CONFIG_LOADED=1
 ###############################################################################
 load_config() {
@@ -99,6 +125,8 @@ SPINE_COUNT="${SPINE_COUNT:-}"
 LEAF_COUNT="${LEAF_COUNT:-}"
 MLAG_PAIRS="${MLAG_PAIRS:-}"
 EOS_VERSION="${EOS_VERSION:-}"
+MEMBER_LEAF_PAIRS="${MEMBER_LEAF_PAIRS:-}"
+MEMBER_LEAVES_PER_PAIR="${MEMBER_LEAVES_PER_PAIR:-}"
 EOF
     chmod 600 "${CONFIG_FILE}"
 }
