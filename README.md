@@ -1,47 +1,88 @@
-# ACT + CVaaS onboarding helper
+# ACT + CVaaS Onboarding Helper 🤖
 
-Automated CVaaS onboarding for any vEOS topology running in Arista
-Cloud Test (ACT). Point it at your Running lab and every switch shows
-up in CVaaS Inventory ~1 minute later.
+Automated CVaaS onboarding for EOS devices running in Arista
+Cloud Test (ACT). Point it at **your running lab** and every switch shows
+up in CVaaS Inventory ~1 minute later. Code authored by Claude.
 
-## Why Does this exist?
+## Why Does this exist? 🤷‍♂️
 
 Using ACT with CVaaS can be painful for a few reasons: 
 
 1. If you need to change a *single link* or add/remove a node, the entire lab must be **destroyed and recreated**. CVaaS knows devices by their serial & system MAC. 
-2. Automating a node that has ZTP configuration necessary to tie EOS devices to CVaaS must be re-deployed every time a topology change is made. 
+2. Automating a system that has ZTP configuration necessary to tie EOS devices to CVaaS must be re-deployed every time a topology change is made. Painful.
 
 This script aims to solve those problems by assigning a static MAC & serial to every device (generate.sh script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
 
-## How this works
+## Quickstart 🏎️
+This has been built & tested on a Mac, mileage may vary on PC.
+
+### Create a new simple ACT Topology
+
+1. Download or clone the repo to your laptop
+2. Open a terminal and move to that directory
+3. Run the `./generate.sh` script
+4. Answer the prompts to build a simple topology you can use in ACT
+5. Upload the generated topo file to ACT + deploy your topology in the ACT UI
+6. Wait for Running state
+
+```bash
+./generate.sh
+#   Serial prefix (e.g. bsmith): rclark
+#   Hostname prefix [rclark]:
+#   Number of spines [2]:
+#   Number of leaves [4]:
+#   Pair leaves into MLAG pairs (y/n) [n]:
+#   EOS version [4.32.2F]:
+#   Continue? [y/N] y
+#   Wrote topology-rclark-2026-05-21.yml
+```
+
+### Once you created (or you have one running) already
+
+1. Collect an ACT API key from the ACT UI
+   * Click your **Username** in the top right > **My Profile** > **API Key**
+2. Collect an onboarding token from CVaaS
+   * **Devices** > **Device Registration** > **Generate a Token**
+3. Run the `./onboard.sh` script locally in a terminal
+4. Follow the prompts 
+
+```bash
+./onboard.sh
+#   ACT tenant [ce]:
+#   ACT username (e.g. firstname.lastname): ryan.clark
+#   ACT API key: ****  (36 chars)
+#   CVaaS enrollment token: ****  (944 chars)
+#   ...
+#   Lab: rclark-campus-lab
+#   EOS password: from local act-campus-topo-no-cvp_rclark.yml
+#   Will paste TerminAttr config to 55 vEOS device(s):
+#     ...
+#   Continue? [y/N] y
+#   Pre-flight: checking CVaaS reachability from each device...
+#     ...
+#   Pasting TerminAttr snippet to each switch...
+#     ...
+```
+
+`onboard.sh` reads the EOS password out of the topology's `veos:` block
+(checking your local file first, then the ACT API, then falling back to
+`cvp123!`).
+
+## How this works ⚙️
 
 Two scripts, run in order:
 
 | Step | Script | What it does |
 | ---- | ------ | ------------ |
-| 1 *(optional)* | `./generate.sh` | Interactively generates a topology YAML with **pinned `serial_number` + `system_mac_address`** on every node. Skip this step if you already have a topology — `onboard.sh` works with any vEOS topology, not just generated ones. Use it when you want CVaaS to recognize the same devices across topology redeploys (state / dashboards / studios / labels carry over). |
+| 1 *(optional)* | `./generate.sh` | Interactively generates a topology YAML with **pinned `serial_number` + `system_mac_address`** on every node. Skip this step if you already have a topology — `onboard.sh` works with any vEOS topology, not just generated ones.  |
 | 2 | `./onboard.sh` | Finds your Running lab via the ACT API and SSH-pastes the TerminAttr onboarding snippet to every vEOS switch. Auto-detects the EOS password from the topology's `veos:` block, so it works with topologies you authored elsewhere. |
 
 Between the two (if you ran step 1): upload + deploy the generated
 topology in the ACT UI.
 
-## How it works
-
-`onboard.sh` queries the ACT API for your Running labs, lets you pick
-one if there's more than one, reads the topology's `veos:` block to get
-the EOS password, runs a CVaaS reachability pre-flight, then SSH-pastes
-the TerminAttr onboarding snippet (with your CVaaS token inlined) to
-every vEOS device in that lab. Devices appear in CVaaS Inventory within
-~1 minute.
-
-`generate.sh` (optional) writes a topology where every switch has a
-stable `serial_number` and `system_mac_address`. CVaaS identifies
-devices by serial, so the same generated topology always produces the
-same set of devices in CVaaS — even after you redeploy.
-
 No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 
-## Files
+## Files 🗂️
 
 | File | Purpose |
 | ---- | ------- |
@@ -64,65 +105,6 @@ On your laptop:
   ```bash
   brew install graphviz
   ```
-
-In ACT:
-- Permission to upload + deploy a topology.
-- Your **ACT username** (e.g. `firstname.lastname`).
-- An **ACT API key** from your ACT user profile.
-
-In CVaaS:
-- An **enrollment token** from `Devices → Inventory → Add Devices →
-  Onboard with Token`. Single reusable token is fine — it works for every
-  device in the topology.
-
-## Quickstart
-
-### You already have a topology (most common)
-
-Upload + deploy your topology in the ACT UI, wait for Running, then:
-
-```bash
-./onboard.sh
-#   ACT tenant [ce]:
-#   ACT username (e.g. firstname.lastname): ryan.clark
-#   ACT API key: ****  (36 chars)
-#   CVaaS enrollment token: ****  (944 chars)
-#   ...
-#   Lab: rclark-campus-lab
-#   EOS password: from local act-campus-topo-no-cvp_rclark.yml
-#   Will paste TerminAttr config to 55 vEOS device(s):
-#     ...
-#   Continue? [y/N] y
-#   Pre-flight: checking CVaaS reachability from each device...
-#     ...
-#   Pasting TerminAttr snippet to each switch...
-#     ...
-```
-
-`onboard.sh` reads the EOS password out of the topology's `veos:` block
-(checking your local file first, then the ACT API, then falling back to
-`cvp123!`) — so whatever credentials your topology uses, it just works.
-Devices appear in CVaaS Inventory within ~1 minute.
-
-### You want pinned device identity across redeploys
-
-If you'll be redeploying the topology and want CVaaS to recognize the
-same devices each time, generate the topology with `./generate.sh`
-first — it pins `serial_number` and `system_mac_address` on every node:
-
-```bash
-./generate.sh
-#   Serial prefix (e.g. bsmith): rclark
-#   Hostname prefix [rclark]:
-#   Number of spines [2]:
-#   Number of leaves [4]:
-#   Pair leaves into MLAG pairs (y/n) [n]:
-#   EOS version [4.32.2F]:
-#   Continue? [y/N] y
-#   Wrote topology-rclark-2026-05-21.yml
-```
-
-Then upload + deploy in the ACT UI and run `./onboard.sh` as above.
 
 ## Redeploying
 
