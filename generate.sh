@@ -29,6 +29,7 @@ MAX_LEAVES=99     # leaves use IPs 192.168.0.21-.119 (cap is paranoia, not a har
 ###############################################################################
 SPINE_COUNT=""
 LEAF_COUNT=""
+MLAG_PAIRS=""
 EOS_VERSION=""
 
 load_config
@@ -37,10 +38,34 @@ echo
 echo "Topology parameters:"
 # SERIAL_PREFIX is intentionally never cached — coworkers MUST set their own
 # so serial namespaces don't collide on the shared ACT tenant.
-prompt SERIAL_PREFIX "Serial prefix"     "example:bsmith"
-prompt SPINE_COUNT   "Number of spines"  "${DEFAULT_SPINES}"
-prompt LEAF_COUNT    "Number of leaves"  "${DEFAULT_LEAVES}"
-prompt EOS_VERSION   "EOS version"       "${DEFAULT_EOS_VERSION}"
+prompt SERIAL_PREFIX "Serial prefix"                       "example:bsmith"
+
+# Hostname prefix — defaults to the serial prefix so the deployed hostname
+# matches the CVaaS serial. Not cached because it tracks SERIAL_PREFIX, which
+# is also never cached.
+read -r -p "  Hostname prefix [${SERIAL_PREFIX}]: " HOSTNAME_PREFIX
+[[ -z "${HOSTNAME_PREFIX}" ]] && HOSTNAME_PREFIX="${SERIAL_PREFIX}"
+
+# If today's file for this prefix already exists, offer to re-prompt the
+# topology params instead of silently reusing the cache and overwriting.
+TODAY="$(date +%Y-%m-%d)"
+OUT_FILE="${PROJECT_DIR}/topology-${SERIAL_PREFIX}-${TODAY}.yml"
+OUT_NAME="${OUT_FILE##*/}"
+if [[ -e "${OUT_FILE}" ]] && [[ -n "${SPINE_COUNT}${LEAF_COUNT}${MLAG_PAIRS}${EOS_VERSION}" ]]; then
+    echo
+    echo "Found existing ${OUT_NAME}."
+    read -r -p "Modify parameters or reuse cached values? [m/C] " ans
+    case "${ans}" in
+        [Mm]*) SPINE_COUNT=""; LEAF_COUNT=""; MLAG_PAIRS=""; EOS_VERSION="" ;;
+        *) ;;
+    esac
+    echo
+fi
+
+prompt SPINE_COUNT   "Number of spines"                    "${DEFAULT_SPINES}"
+prompt LEAF_COUNT    "Number of leaves"                    "${DEFAULT_LEAVES}"
+prompt MLAG_PAIRS    "Pair leaves into MLAG pairs (y/n)"   "n"
+prompt EOS_VERSION   "EOS version"                         "${DEFAULT_EOS_VERSION}"
 
 # validate
 if ! [[ "${SPINE_COUNT}" =~ ^[1-9][0-9]*$ ]] || (( SPINE_COUNT > MAX_SPINES )); then
@@ -55,19 +80,33 @@ if ! [[ "${SERIAL_PREFIX}" =~ ^[A-Za-z0-9]+$ ]]; then
     echo "ERROR: serial prefix must be alphanumeric (no dashes/spaces), got '${SERIAL_PREFIX}'." >&2
     exit 1
 fi
+if ! [[ "${HOSTNAME_PREFIX}" =~ ^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$ ]]; then
+    echo "ERROR: hostname prefix must be alphanumeric, with optional internal dashes (no leading, trailing, or consecutive dashes), got '${HOSTNAME_PREFIX}'." >&2
+    exit 1
+fi
+
+# Normalize MLAG_PAIRS to canonical "y" / "n" (case-insensitive, accepts yes/no).
+case "${MLAG_PAIRS}" in
+    [Yy]|[Yy][Ee][Ss])  MLAG_PAIRS="y" ;;
+    [Nn]|[Nn][Oo]|"")   MLAG_PAIRS="n" ;;
+    *) echo "ERROR: MLAG choice must be y or n, got '${MLAG_PAIRS}'." >&2; exit 1 ;;
+esac
+if [[ "${MLAG_PAIRS}" == "y" ]] && (( LEAF_COUNT % 2 != 0 )); then
+    echo "ERROR: MLAG pairing requires an even number of leaves (got ${LEAF_COUNT})." >&2
+    exit 1
+fi
 
 save_config
 echo
 
 ###############################################################################
-# decide output filename and confirm
+# confirm before writing
 ###############################################################################
-TODAY="$(date +%Y-%m-%d)"
-OUT_FILE="${PROJECT_DIR}/topology-${SERIAL_PREFIX}-${TODAY}.yml"
-OUT_NAME="${OUT_FILE##*/}"
+mlag_note=""
+[[ "${MLAG_PAIRS}" == "y" ]] && mlag_note=", MLAG-paired leaves"
 
 echo "Will write ${OUT_NAME}"
-echo "  ${SPINE_COUNT} spine(s), ${LEAF_COUNT} leaf/leaves, EOS ${EOS_VERSION}, full mesh"
+echo "  ${SPINE_COUNT} spine(s), ${LEAF_COUNT} leaf/leaves, EOS ${EOS_VERSION}, full mesh${mlag_note}"
 if [[ -e "${OUT_FILE}" ]]; then
     echo "  (file already exists — will be overwritten)"
 fi
@@ -95,6 +134,10 @@ veos:
   username: cvpadmin
   password: cvp123!
   version: ${EOS_VERSION}
+  # Required for CVaaS: every vEOS needs outbound internet to reach
+  # apiserver.arista.io. This toolkit targets CVaaS (not on-prem CVP, which
+  # ACT can stand up locally), so we always enable it.
+  internet_access: true
 
 nodes:
 
@@ -106,7 +149,7 @@ HEADER
     for (( i=1; i<=SPINE_COUNT; i++ )); do
         cat <<NODE
 
-  - spine${i}:
+  - ${HOSTNAME_PREFIX}-spine${i}:
       node_type: veos
       ip_addr: 192.168.0.$((10 + i))/24
       serial_number: ${SERIAL_PREFIX}-spine${i}
@@ -125,7 +168,7 @@ LEAFHEADER
     for (( i=1; i<=LEAF_COUNT; i++ )); do
         cat <<NODE
 
-  - leaf${i}:
+  - ${HOSTNAME_PREFIX}-leaf${i}:
       node_type: veos
       ip_addr: 192.168.0.$((20 + i))/24
       serial_number: ${SERIAL_PREFIX}-leaf${i}
@@ -134,7 +177,19 @@ LEAFHEADER
 NODE
     done
 
-    cat <<'LINKHEADER'
+    if [[ "${MLAG_PAIRS}" == "y" ]]; then
+        cat <<'LINKHEADER'
+
+###############################################################################
+# Data-plane links
+#   spine <-> leaf full mesh: spine[i] Ethernet[j] <-> leaf[j] Ethernet[i]
+#   MLAG peer links:          leaf<odd> <-> leaf<even> on the next two ports
+#                             after the spine uplinks
+###############################################################################
+links:
+LINKHEADER
+    else
+        cat <<'LINKHEADER'
 
 ###############################################################################
 # Data-plane links (spine <-> leaf full mesh)
@@ -142,17 +197,103 @@ NODE
 ###############################################################################
 links:
 LINKHEADER
+    fi
 
+    # Spine <-> leaf full mesh
     for (( s=1; s<=SPINE_COUNT; s++ )); do
         for (( l=1; l<=LEAF_COUNT; l++ )); do
-            echo "  - connection: [spine${s}:Ethernet${l}, leaf${l}:Ethernet${s}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-spine${s}:Ethernet${l}, ${HOSTNAME_PREFIX}-leaf${l}:Ethernet${s}]"
         done
         if (( s < SPINE_COUNT )); then
             echo ""
         fi
     done
+
+    # MLAG peer links: two cables between each (leaf<odd>, leaf<even>) pair,
+    # using the next two free ports after the spine uplinks.
+    if [[ "${MLAG_PAIRS}" == "y" ]]; then
+        mlag_port_a=$((SPINE_COUNT + 1))
+        mlag_port_b=$((SPINE_COUNT + 2))
+        echo ""
+        echo "  # MLAG peer links"
+        for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+            j=$((i + 1))
+            echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_a}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_b}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_b}]"
+        done
+    fi
 } > "${OUT_FILE}"
 
 echo
 echo "Wrote ${OUT_NAME}"
+
+###############################################################################
+# render a PNG of the topology if graphviz is installed
+###############################################################################
+PNG_FILE="${OUT_FILE%.yml}.png"
+PNG_NAME="${PNG_FILE##*/}"
+
+if command -v dot >/dev/null 2>&1; then
+    diagram_title="${SERIAL_PREFIX}: ${SPINE_COUNT} spine × ${LEAF_COUNT} leaf"
+    [[ "${MLAG_PAIRS}" == "y" ]] && diagram_title+=" (MLAG)"
+
+    if {
+        echo 'digraph topology {'
+        echo "  label=\"${diagram_title}\";"
+        echo '  labelloc="t";'
+        echo '  fontname="Helvetica";'
+        echo '  fontsize=16;'
+        echo '  rankdir=TB;'
+        echo '  splines=line;'
+        echo '  nodesep=0.4;'
+        echo '  ranksep=1.0;'
+        echo '  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11];'
+        echo '  edge [dir=none, penwidth=1.2];'
+        echo ''
+
+        # Spines on the top rank
+        printf '  { rank=same;'
+        for (( s=1; s<=SPINE_COUNT; s++ )); do
+            printf ' spine%d [label="%s-spine%d\\n192.168.0.%d", fillcolor="#dbeafe"];' \
+                "${s}" "${HOSTNAME_PREFIX}" "${s}" "$((10+s))"
+        done
+        echo ' }'
+
+        # Leaves on the bottom rank
+        printf '  { rank=same;'
+        for (( l=1; l<=LEAF_COUNT; l++ )); do
+            printf ' leaf%d [label="%s-leaf%d\\n192.168.0.%d", fillcolor="#fef3c7"];' \
+                "${l}" "${HOSTNAME_PREFIX}" "${l}" "$((20+l))"
+        done
+        echo ' }'
+        echo ''
+
+        # Spine <-> leaf full mesh
+        for (( s=1; s<=SPINE_COUNT; s++ )); do
+            for (( l=1; l<=LEAF_COUNT; l++ )); do
+                echo "  spine${s} -> leaf${l};"
+            done
+        done
+
+        # MLAG peer links (dashed red, constraint=false so they don't pull
+        # the leaves out of rank).
+        if [[ "${MLAG_PAIRS}" == "y" ]]; then
+            echo ''
+            for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+                j=$((i + 1))
+                echo "  leaf${i} -> leaf${j} [style=dashed, color=\"#dc2626\", penwidth=2, constraint=false];"
+            done
+        fi
+
+        echo '}'
+    } | dot -Tpng -o "${PNG_FILE}" 2>/dev/null; then
+        echo "Wrote ${PNG_NAME}"
+    else
+        echo "WARNING: graphviz failed to render ${PNG_NAME}; YAML is unaffected." >&2
+        rm -f "${PNG_FILE}"
+    fi
+else
+    echo "(install graphviz to get a topology PNG: brew install graphviz)"
+fi
+
 echo "Next:  upload + deploy in the ACT UI, then run ./onboard.sh"
