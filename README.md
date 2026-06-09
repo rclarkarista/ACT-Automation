@@ -121,6 +121,16 @@ every node (either via `generate.sh` or because you added them
 manually), CVaaS will recognize the devices as the same ones from
 before — state / dashboards / studios / labels carry over.
 
+## Cleaning up CVaaS 🧹
+Be respectul to others and clean up any orphaned VM's you have built and aim to retire. CVaaS actually has a nice bulk decommission feature. 
+
+1. Click **Devices** > **Device Registration**
+2. Click the **Decommission and Replace Devices** tab at the top
+3. Click the **Hostname** chip and type in the hostname string you used
+4. Click select all and click the **Decommission** button
+   
+![alt text](<cvaas-cleanup.gif>)
+
 ## Sharing this with someone else 🎁
 
 1. Clone the repo.
