@@ -42,6 +42,20 @@ EOS_PASS_DEFAULT="cvp123!"
 CVAAS_HOST="apiserver.arista.io"
 CVAAS_PORT="443"
 
+# Per-phase concurrency. Conservative default — ACT's outbound NAT and
+# per-vEOS readiness timing can cause transient failures when too many
+# devices fire simultaneously. Override with `PARALLELISM=N ./onboard.sh`
+# (e.g. 8 or 16) for larger labs. Each phase also retries any failures
+# serially before declaring them real, so transient hiccups are caught
+# even at higher parallelism.
+MAX_PARALLEL="${PARALLELISM:-4}"
+
+# These vars are read by the per-device worker functions running in xargs
+# subshells, so they need to live in the environment. SNIPPET, LOG_DIR, and
+# updated EOS_PASS are exported here too — bash carries the export attribute
+# forward, so later assignments propagate automatically.
+export EOS_USER EOS_PASS CVAAS_HOST CVAAS_PORT SNIPPET LOG_DIR
+
 ###############################################################################
 # extract_veos_password — read a YAML topology on stdin, print the password
 # field from inside the `veos:` block. Handles bare, single-quoted, and
@@ -97,6 +111,68 @@ ssh_eos() {
         -o LogLevel=ERROR \
         -o ConnectTimeout=10 \
         "${EOS_USER}@${ip}"
+}
+
+###############################################################################
+# Per-device worker functions — one per phase. Each takes (host, ip), writes
+# its full SSH output to ${LOG_DIR}/<host>.<phase>.log, and prints a single
+# completion line to stdout. Invoked in parallel via `xargs -0 -P` later;
+# output appears in completion order, not device order. Per-phase failure
+# detection happens after the fan-out finishes (see derive-* loops below).
+###############################################################################
+preflight_worker() {
+    local host=$1 ip=$2
+    local log="${LOG_DIR}/${host}.preflight.log"
+    ssh_eos "${ip}" <<EOSCHECK > "${log}" 2>&1
+enable
+bash curl --connect-timeout 5 -sS -o /dev/null https://${CVAAS_HOST}:${CVAAS_PORT}/ && echo CVAAS_OK
+EOSCHECK
+    if grep -q "CVAAS_OK" "${log}"; then
+        printf "  %-30s  %-16s  reachable\n" "${host}" "${ip}"
+    else
+        printf "  %-30s  %-16s  UNREACHABLE\n" "${host}" "${ip}"
+    fi
+}
+
+paste_worker() {
+    local host=$1 ip=$2
+    local log="${LOG_DIR}/${host}.paste.log"
+    if ssh_eos "${ip}" <<< "${SNIPPET}" > "${log}" 2>&1; then
+        # Marker file so the post-loop derivation knows this device succeeded
+        # (ssh's exit code is otherwise lost across the xargs subshell boundary).
+        touch "${log}.ok"
+        printf "  %-30s  %-16s  ok\n" "${host}" "${ip}"
+    else
+        printf "  %-30s  %-16s  FAILED (see %s)\n" "${host}" "${ip}" "${log}"
+    fi
+}
+
+postcheck_worker() {
+    local host=$1 ip=$2
+    local log="${LOG_DIR}/${host}.terminattr.log"
+    ssh_eos "${ip}" <<< "enable
+show agent TerminAttr logs" > "${log}" 2>&1 || true
+    local pattern='TCP dial failed|server misbehaving|no such host|connection refused|no route to host|context deadline exceeded'
+    if grep -qE "${pattern}" "${log}"; then
+        printf "  %-30s  %-16s  errors found (see %s)\n" "${host}" "${ip}" "${log}"
+    else
+        printf "  %-30s  %-16s  clean\n" "${host}" "${ip}"
+    fi
+}
+
+export -f ssh_eos preflight_worker paste_worker postcheck_worker
+
+###############################################################################
+# fanout <worker-name> — read DEVICES on stdin (tab-separated host\tip lines)
+# and dispatch <worker-name> across them with bounded concurrency. Output
+# arrives in completion order.
+###############################################################################
+fanout() {
+    local worker=$1
+    while IFS=$'\t' read -r host ip; do
+        [[ -z "$host" ]] && continue
+        printf '%s\0%s\0' "$host" "$ip"
+    done | xargs -0 -n 2 -P "${MAX_PARALLEL}" bash -c "${worker} \"\$1\" \"\$2\"" _
 }
 
 ###############################################################################
@@ -305,6 +381,10 @@ echo
 read -r -p "Continue? [y/N] " ans
 case "${ans}" in [Yy]*) ;; *) echo "Aborted."; exit 1 ;; esac
 
+# All three phases write per-device logs here. Created once, reused across
+# the run so the user can grep into any single device's history.
+LOG_DIR="$(mktemp -d -t onboard-XXXXXX)"
+
 ###############################################################################
 # pre-flight: every device must be able to reach apiserver.arista.io:443.
 # TerminAttr won't register with CVaaS without it, and the failure mode is
@@ -312,24 +392,38 @@ case "${ans}" in [Yy]*) ;; *) echo "Aborted."; exit 1 ;; esac
 # can never connect). Abort here so the user fixes the network first.
 ###############################################################################
 echo
-echo "Pre-flight: checking CVaaS reachability from each device..."
+echo "Pre-flight: checking CVaaS reachability from each device (parallel ${MAX_PARALLEL}-wide)..."
 echo "------------------------------------------------------------------------"
+fanout preflight_worker <<< "${DEVICES}"
+echo "------------------------------------------------------------------------"
+
+# Derive UNREACHABLE list in API/device order (xargs returned in completion order).
 UNREACHABLE=()
 while IFS=$'\t' read -r host ip; do
-    printf "  %-30s  %-16s  " "${host}" "${ip}"
-    out=$(ssh_eos "${ip}" <<EOSCHECK 2>&1
-enable
-bash curl --connect-timeout 5 -sS -o /dev/null https://${CVAAS_HOST}:${CVAAS_PORT}/ && echo CVAAS_OK
-EOSCHECK
-)
-    if grep -q "CVAAS_OK" <<< "${out}"; then
-        echo "reachable"
-    else
-        echo "UNREACHABLE"
+    [[ -z "$host" ]] && continue
+    if ! grep -q "CVAAS_OK" "${LOG_DIR}/${host}.preflight.log" 2>/dev/null; then
         UNREACHABLE+=("${host}")
     fi
 done <<< "${DEVICES}"
-echo "------------------------------------------------------------------------"
+
+# Retry pass: try unreachable devices one more time serially. Catches
+# transient parallel-contention failures (NAT, DNS races, vEOS curl timing)
+# without giving up the speedup for the common case.
+if (( ${#UNREACHABLE[@]} > 0 )); then
+    echo
+    echo "Retrying ${#UNREACHABLE[@]} unreachable device(s) serially..."
+    echo "------------------------------------------------------------------------"
+    STILL_UNREACHABLE=()
+    for host in "${UNREACHABLE[@]}"; do
+        ip=$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' <<< "${DEVICES}")
+        preflight_worker "$host" "$ip"
+        if ! grep -q "CVAAS_OK" "${LOG_DIR}/${host}.preflight.log" 2>/dev/null; then
+            STILL_UNREACHABLE+=("${host}")
+        fi
+    done
+    echo "------------------------------------------------------------------------"
+    UNREACHABLE=("${STILL_UNREACHABLE[@]+"${STILL_UNREACHABLE[@]}"}")
+fi
 
 if (( ${#UNREACHABLE[@]} > 0 )); then
     echo
@@ -346,21 +440,35 @@ fi
 # paste the snippet to each device
 ###############################################################################
 echo
-echo "Pasting TerminAttr snippet to each switch..."
+echo "Pasting TerminAttr snippet to each switch (parallel ${MAX_PARALLEL}-wide)..."
 echo "------------------------------------------------------------------------"
+fanout paste_worker <<< "${DEVICES}"
+echo "------------------------------------------------------------------------"
+
+# Derive FAILED list — paste_worker touches <log>.ok on success.
 FAILED=()
-LOG_DIR="$(mktemp -d -t onboard-XXXXXX)"
 while IFS=$'\t' read -r host ip; do
-    printf "  %-12s  %-16s  " "${host}" "${ip}"
-    log="${LOG_DIR}/${host}.log"
-    if ssh_eos "${ip}" <<< "${SNIPPET}" >"${log}" 2>&1; then
-        echo "ok"
-    else
-        echo "FAILED (see ${log})"
-        FAILED+=("${host}")
-    fi
+    [[ -z "$host" ]] && continue
+    [[ -f "${LOG_DIR}/${host}.paste.log.ok" ]] || FAILED+=("${host}")
 done <<< "${DEVICES}"
-echo "------------------------------------------------------------------------"
+
+# Retry pass — same rationale as the pre-flight retry. The snippet is
+# idempotent (configure / daemon / write to the same final state) so a
+# retry against a partially-configured device finishes the job cleanly.
+if (( ${#FAILED[@]} > 0 )); then
+    echo
+    echo "Retrying ${#FAILED[@]} failed device(s) serially..."
+    echo "------------------------------------------------------------------------"
+    STILL_FAILED=()
+    for host in "${FAILED[@]}"; do
+        ip=$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' <<< "${DEVICES}")
+        rm -f "${LOG_DIR}/${host}.paste.log.ok"
+        paste_worker "$host" "$ip"
+        [[ -f "${LOG_DIR}/${host}.paste.log.ok" ]] || STILL_FAILED+=("${host}")
+    done
+    echo "------------------------------------------------------------------------"
+    FAILED=("${STILL_FAILED[@]+"${STILL_FAILED[@]}"}")
+fi
 
 if (( ${#FAILED[@]} > 0 )); then
     echo
@@ -382,23 +490,40 @@ echo
 echo "Waiting 15s for TerminAttr to attempt registration..."
 sleep 15
 echo
-echo "Checking TerminAttr logs on each device..."
+echo "Checking TerminAttr logs on each device (parallel ${MAX_PARALLEL}-wide)..."
 echo "------------------------------------------------------------------------"
+fanout postcheck_worker <<< "${DEVICES}"
+echo "------------------------------------------------------------------------"
+
+# Derive LOG_ERRORS list — same error pattern the worker uses, applied to the
+# per-device log it wrote. (Kept in sync with postcheck_worker's pattern.)
 ERROR_PATTERN='TCP dial failed|server misbehaving|no such host|connection refused|no route to host|context deadline exceeded'
 LOG_ERRORS=()
 while IFS=$'\t' read -r host ip; do
-    printf "  %-30s  %-16s  " "${host}" "${ip}"
-    daemon_log="${LOG_DIR}/${host}.terminattr.log"
-    ssh_eos "${ip}" <<< "enable
-show agent TerminAttr logs" > "${daemon_log}" 2>&1 || true
-    if grep -qE "${ERROR_PATTERN}" "${daemon_log}"; then
-        echo "errors found (see ${daemon_log})"
+    [[ -z "$host" ]] && continue
+    if grep -qE "${ERROR_PATTERN}" "${LOG_DIR}/${host}.terminattr.log" 2>/dev/null; then
         LOG_ERRORS+=("${host}")
-    else
-        echo "clean"
     fi
 done <<< "${DEVICES}"
-echo "------------------------------------------------------------------------"
+
+# Retry pass — re-pull logs serially. TerminAttr may have had a transient
+# error during startup but recovered by now, and the fresh log will show
+# only the steady-state status.
+if (( ${#LOG_ERRORS[@]} > 0 )); then
+    echo
+    echo "Retrying ${#LOG_ERRORS[@]} device(s) with logged errors serially..."
+    echo "------------------------------------------------------------------------"
+    STILL_ERRORS=()
+    for host in "${LOG_ERRORS[@]}"; do
+        ip=$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' <<< "${DEVICES}")
+        postcheck_worker "$host" "$ip"
+        if grep -qE "${ERROR_PATTERN}" "${LOG_DIR}/${host}.terminattr.log" 2>/dev/null; then
+            STILL_ERRORS+=("${host}")
+        fi
+    done
+    echo "------------------------------------------------------------------------"
+    LOG_ERRORS=("${STILL_ERRORS[@]+"${STILL_ERRORS[@]}"}")
+fi
 
 if (( ${#LOG_ERRORS[@]} > 0 )); then
     echo
