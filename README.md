@@ -1,20 +1,19 @@
 # ACT + CVaaS Onboarding Helper 🤖
 
-Automated CVaaS onboarding for EOS devices running in Arista
-Cloud Test (ACT). Point it at **your running lab** and every switch shows
-up in CVaaS Inventory ~1 minute later. Code authored by Claude.
+An automated **CVaaS onboarding tool** & **ACT lab creator** for EOS devices running in Arista Cloud Test (ACT). Point it at **your running lab** and every switch shows up in CVaaS Inventory ~1 minute later. *Code authored by Claude.*
 
 ## Why Does this exist? 🤷‍♂️
 
 Using ACT with CVaaS can be painful for a few reasons: 
 
-1. If you need to change a *single link* or add/remove a node, the entire lab must be **destroyed and recreated**. CVaaS knows devices by their serial & system MAC. 
+1. If you need to change a *single link* or add/remove a node, the entire lab must be **destroyed and recreated**. CVaaS knows devices by their serial & system MAC.
 2. Automating a system that has ZTP configuration necessary to tie EOS devices to CVaaS must be re-deployed every time a topology change is made. Painful.
 
-This script aims to solve those problems by assigning a static MAC & serial to every device (generate.sh script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
+This script aims to solve those problems by assigning a static MAC & serial to every device (`generate.sh` script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
 
 ## Quickstart 🏎️
-This has been built & tested on a Mac, mileage may vary on PC.
+> [!NOTE]
+> This has been built & tested on a Mac, mileage may vary on PC.
 
 ### Create a new simple ACT Topology
 
@@ -37,7 +36,7 @@ This has been built & tested on a Mac, mileage may vary on PC.
 #   Wrote topology-rclark-2026-05-21.yml
 ```
 
-### Once you created (or you have one running) already
+### Once you created a lab (or you have one running) already
 
 1. Collect an ACT API key from the ACT UI
    * Click your **Username** in the top right > **My Profile** > **API Key**
@@ -101,7 +100,7 @@ On your laptop:
   # bash + curl ship with macOS
   ```
 - (Optional) `graphviz` — if installed, `generate.sh` also emits a PNG
-  diagram alongside the YAML:
+  diagram to upload with your topology file in ACT alongside the YAML:
   ```bash
   brew install graphviz
   ```
@@ -111,11 +110,10 @@ On your laptop:
 When you want to change the topology:
 
 1. Edit the topology — for `generate.sh`-produced ones, re-run it and
-   bump spine/leaf counts as needed (the new file has today's date in
-   its name, so it won't collide with previous uploads). For
+   change spine/leaf counts as needed (the new file has today's date in
+   its name, so it won't overwrite your previous labs). For
    hand-authored topologies, edit in place.
-2. Upload + deploy in the ACT UI. (Leave the old lab undeployed/deleted
-   to avoid duplicates.)
+2. Upload + deploy in the ACT UI. Either create a new lab or overwrite your existing.
 3. Run `./onboard.sh` and pick the new lab from the list.
 
 If the topology has pinned `serial_number` + `system_mac_address` on
@@ -123,7 +121,7 @@ every node (either via `generate.sh` or because you added them
 manually), CVaaS will recognize the devices as the same ones from
 before — state / dashboards / studios / labels carry over.
 
-## Sharing this with a coworker
+## Sharing this with someone else 🎁
 
 1. Clone the repo.
 2. Run `./onboard.sh` against any Running lab — they enter their own ACT
