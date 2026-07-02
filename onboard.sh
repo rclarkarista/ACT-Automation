@@ -57,6 +57,71 @@ MAX_PARALLEL="${PARALLELISM:-4}"
 export EOS_USER EOS_PASS CVAAS_HOST CVAAS_PORT SNIPPET LOG_DIR
 
 ###############################################################################
+# validate_cvaas_token <token>
+#   Catch the common token failure modes (expired, malformed, copy-paste
+#   truncation) BEFORE we waste time pasting to N devices. The CVaaS
+#   enrollment token is a JWT — decode the payload, check the `exp` claim,
+#   and bail if it's already past.
+#
+#   Returns: 0 if usable, 1 if definitely broken.
+###############################################################################
+validate_cvaas_token() {
+    local token=$1
+
+    # JWT format: header.payload.signature (exactly 3 dot-separated parts).
+    local payload
+    payload=$(awk -F. '{ if (NF == 3) print $2 }' <<< "${token}")
+    if [[ -z "${payload}" ]]; then
+        echo "ERROR: CVaaS token isn't a valid JWT (need 3 dot-separated parts)." >&2
+        echo "       Make sure you copied the full token from CVaaS:" >&2
+        echo "       Devices → Device Registration → Generate a Token" >&2
+        return 1
+    fi
+
+    # base64url → standard base64 (replace -/_ with +//, re-pad)
+    local b64="${payload//-/+}"
+    b64="${b64//_/\/}"
+    case $((${#b64} % 4)) in
+        2) b64="${b64}==" ;;
+        3) b64="${b64}="  ;;
+    esac
+
+    local decoded
+    decoded=$(base64 -d <<< "${b64}" 2>/dev/null)
+    if [[ -z "${decoded}" ]]; then
+        echo "ERROR: CVaaS token payload isn't valid base64 (token looks corrupted/truncated)." >&2
+        return 1
+    fi
+
+    local exp
+    exp=$(jq -r '.exp // empty' <<< "${decoded}" 2>/dev/null)
+    if [[ -z "${exp}" ]]; then
+        echo "CVaaS token: structure OK (no expiry claim to verify)"
+        return 0
+    fi
+
+    local now
+    now=$(date +%s)
+    if (( exp <= now )); then
+        local exp_human
+        exp_human=$(date -r "${exp}" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || echo "unix:${exp}")
+        echo "ERROR: CVaaS token expired at ${exp_human}." >&2
+        echo "       Generate a new one: CVaaS UI → Devices → Device Registration → Generate a Token" >&2
+        return 1
+    fi
+
+    local remaining=$((exp - now))
+    local days=$((remaining / 86400))
+    local hours=$(((remaining % 86400) / 3600))
+    if (( days > 0 )); then
+        echo "CVaaS token: valid (expires in ${days}d ${hours}h)"
+    else
+        echo "CVaaS token: valid (expires in ${hours}h)"
+    fi
+    return 0
+}
+
+###############################################################################
 # extract_veos_password — read a YAML topology on stdin, print the password
 # field from inside the `veos:` block. Handles bare, single-quoted, and
 # double-quoted values. Prints nothing if not found.
@@ -185,6 +250,10 @@ CVAAS_TOKEN=""
 
 load_config
 
+# Fail fast on missing tools — before we collect creds the user would otherwise
+# have to re-enter on the next attempt.
+require_tools curl jq sshpass
+
 echo
 echo "ACT API access:"
 prompt ACT_TENANT  "ACT tenant"                              "${DEFAULT_ACT_TENANT}"
@@ -201,6 +270,16 @@ for v in ACT_TENANT ACT_USER ACT_API_KEY CVAAS_TOKEN; do
         exit 1
     fi
 done
+
+# Validate the CVaaS token now (offline JWT decode + expiry check). If it
+# fails, wipe the cached value so the next run re-prompts for a fresh one
+# instead of silently re-using the broken one. Other cached creds stay.
+if ! validate_cvaas_token "${CVAAS_TOKEN}"; then
+    CVAAS_TOKEN=""
+    save_config
+    echo "(Cleared cached CVaaS token; re-run with a fresh one.)" >&2
+    exit 1
+fi
 
 save_config
 echo
@@ -225,8 +304,6 @@ EOSPASTE
 ###############################################################################
 # look up Running labs and pick one
 ###############################################################################
-require_tools curl jq sshpass
-
 API_BASE="https://${ACT_TENANT}.act.arista.com/rest/v1"
 
 echo "Logging into ACT (${API_BASE})..."

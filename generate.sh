@@ -22,11 +22,15 @@ DEFAULT_LEAVES=4
 DEFAULT_EOS_VERSION="4.35.4M"
 DEFAULT_MEMBER_LEAVES_PER_PAIR=2
 
-MAX_SPINES=9                       # spines use IPs 192.168.0.11-.19
-MAX_LEAVES=99                      # leaves use IPs 192.168.0.21-.119
-MAX_MEMBER_LEAVES_PER_PAIR=9       # member leaves dual-home to a pair, use leaf
-                                   # ports SPINE_COUNT+3 onwards
-MAX_TOTAL_MEMBER_LEAVES=100        # member leaves use IPs 192.168.0.131-.230
+MAX_DC=4
+MAX_SPINES=9
+MAX_LEAVES=99                      # single-DC: IPs 192.168.0.21-.119
+MAX_LEAVES_MULTI=39                # multi-DC: per-DC IP block has room for 39
+MAX_MEMBER_LEAVES_PER_PAIR=9
+MAX_TOTAL_MEMBER_LEAVES=100        # single-DC: IPs 192.168.0.131-.230
+MAX_TOTAL_MEMBER_LEAVES_MULTI=12   # multi-DC: per-DC IP block has room for 12
+
+DC_LETTERS=(A B C D)
 
 ###############################################################################
 # load_params_from_topology_file <yaml-file>
@@ -41,50 +45,88 @@ MAX_TOTAL_MEMBER_LEAVES=100        # member leaves use IPs 192.168.0.131-.230
 load_params_from_topology_file() {
     local file=$1
 
-    # Hostname prefix from the first "  - <prefix>-spine1:" node line
-    local first_spine
-    first_spine=$(grep -m1 -E "^  - [A-Za-z0-9-]+-spine1:$" "$file" || true)
-    if [[ -n "$first_spine" ]]; then
-        HOSTNAME_PREFIX=$(sed -E 's/^  - (.+)-spine1:$/\1/' <<< "$first_spine")
-    fi
+    # Detect multi-DC by looking for a backbone router node (-bb1:)
+    local bb_line
+    bb_line=$(grep -m1 -E "^  - [A-Za-z0-9-]+-bb1:$" "$file" || true)
 
-    if [[ -z "${HOSTNAME_PREFIX}" ]]; then
-        echo "WARNING: could not detect hostname prefix in $(basename "$file"); falling back to '${SERIAL_PREFIX}'." >&2
-        HOSTNAME_PREFIX="${SERIAL_PREFIX}"
-    fi
+    if [[ -n "$bb_line" ]]; then
+        # --- Multi-DC topology ---
+        HOSTNAME_PREFIX=$(sed -E 's/^  - (.+)-bb1:$/\1/' <<< "$bb_line")
+        DC_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-[A-D]-border1:$" "$file" 2>/dev/null || echo "")
 
-    SPINE_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-spine[0-9]+:$" "$file" 2>/dev/null || echo "")
-    LEAF_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-leaf[0-9]+:$" "$file" 2>/dev/null || echo "")
-    local mleaf_total
-    mleaf_total=$(grep -cE "^  - ${HOSTNAME_PREFIX}-mleaf[0-9]+:$" "$file" 2>/dev/null || echo 0)
+        # Use DC "A" as the reference (all DCs are uniform)
+        SPINE_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-A-spine[0-9]+:$" "$file" 2>/dev/null || echo "")
+        LEAF_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-A-leaf[0-9]+:$" "$file" 2>/dev/null || echo "")
+        local mleaf_total
+        mleaf_total=$(grep -cE "^  - ${HOSTNAME_PREFIX}-A-mleaf[0-9]+:$" "$file" 2>/dev/null || echo 0)
 
-    EOS_VERSION=$(awk '/^veos:/{f=1} f && /^[a-zA-Z]/ && !/^veos:/{f=0} f && /^[[:space:]]+version:/{print $2; exit}' "$file")
+        EOS_VERSION=$(awk '/^veos:/{f=1} f && /^[a-zA-Z]/ && !/^veos:/{f=0} f && /^[[:space:]]+version:/{print $2; exit}' "$file")
 
-    # MLAG: presence of any direct leaf<->leaf link
-    if grep -qE "^  - connection: \[${HOSTNAME_PREFIX}-leaf[0-9]+:.*, ${HOSTNAME_PREFIX}-leaf[0-9]+:" "$file"; then
-        MLAG_PAIRS="y"
+        if grep -qE "^  - connection: \[${HOSTNAME_PREFIX}-A-leaf[0-9]+:.*, ${HOSTNAME_PREFIX}-A-leaf[0-9]+:" "$file"; then
+            MLAG_PAIRS="y"
+        else
+            MLAG_PAIRS="n"
+        fi
+
+        if (( mleaf_total > 0 )); then
+            local pairs_csv
+            pairs_csv=$(grep -E "^  - connection: \[${HOSTNAME_PREFIX}-A-mleaf[0-9]+:Ethernet1, ${HOSTNAME_PREFIX}-A-leaf[0-9]+:" "$file" \
+                | sed -E "s/.*${HOSTNAME_PREFIX}-A-leaf([0-9]+):.*/\1/" \
+                | awk '{ print int(($1 + 1) / 2) }' \
+                | sort -un \
+                | paste -sd, -)
+            MEMBER_LEAF_PAIRS="$pairs_csv"
+            local num_pairs
+            num_pairs=$(awk -F, '{print NF}' <<< "${pairs_csv}")
+            (( num_pairs > 0 )) && MEMBER_LEAVES_PER_PAIR=$((mleaf_total / num_pairs))
+        fi
     else
-        MLAG_PAIRS="n"
-    fi
+        # --- Single-DC topology ---
+        DC_COUNT="1"
 
-    # Member leaves: derive pairs and per-pair count from mleaf:Eth1 -> leaf:Eth uplinks
-    if (( mleaf_total > 0 )); then
-        local pairs_csv
-        pairs_csv=$(grep -E "^  - connection: \[${HOSTNAME_PREFIX}-mleaf[0-9]+:Ethernet1, ${HOSTNAME_PREFIX}-leaf[0-9]+:" "$file" \
-            | sed -E "s/.*${HOSTNAME_PREFIX}-leaf([0-9]+):.*/\1/" \
-            | awk '{ print int(($1 + 1) / 2) }' \
-            | sort -un \
-            | paste -sd, -)
-        MEMBER_LEAF_PAIRS="$pairs_csv"
-        local num_pairs
-        num_pairs=$(awk -F, '{print NF}' <<< "${pairs_csv}")
-        (( num_pairs > 0 )) && MEMBER_LEAVES_PER_PAIR=$((mleaf_total / num_pairs))
+        local first_spine
+        first_spine=$(grep -m1 -E "^  - [A-Za-z0-9-]+-spine1:$" "$file" || true)
+        if [[ -n "$first_spine" ]]; then
+            HOSTNAME_PREFIX=$(sed -E 's/^  - (.+)-spine1:$/\1/' <<< "$first_spine")
+        fi
+
+        if [[ -z "${HOSTNAME_PREFIX}" ]]; then
+            echo "WARNING: could not detect hostname prefix in $(basename "$file"); falling back to '${SERIAL_PREFIX}'." >&2
+            HOSTNAME_PREFIX="${SERIAL_PREFIX}"
+        fi
+
+        SPINE_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-spine[0-9]+:$" "$file" 2>/dev/null || echo "")
+        LEAF_COUNT=$(grep -cE "^  - ${HOSTNAME_PREFIX}-leaf[0-9]+:$" "$file" 2>/dev/null || echo "")
+        local mleaf_total
+        mleaf_total=$(grep -cE "^  - ${HOSTNAME_PREFIX}-mleaf[0-9]+:$" "$file" 2>/dev/null || echo 0)
+
+        EOS_VERSION=$(awk '/^veos:/{f=1} f && /^[a-zA-Z]/ && !/^veos:/{f=0} f && /^[[:space:]]+version:/{print $2; exit}' "$file")
+
+        if grep -qE "^  - connection: \[${HOSTNAME_PREFIX}-leaf[0-9]+:.*, ${HOSTNAME_PREFIX}-leaf[0-9]+:" "$file"; then
+            MLAG_PAIRS="y"
+        else
+            MLAG_PAIRS="n"
+        fi
+
+        if (( mleaf_total > 0 )); then
+            local pairs_csv
+            pairs_csv=$(grep -E "^  - connection: \[${HOSTNAME_PREFIX}-mleaf[0-9]+:Ethernet1, ${HOSTNAME_PREFIX}-leaf[0-9]+:" "$file" \
+                | sed -E "s/.*${HOSTNAME_PREFIX}-leaf([0-9]+):.*/\1/" \
+                | awk '{ print int(($1 + 1) / 2) }' \
+                | sort -un \
+                | paste -sd, -)
+            MEMBER_LEAF_PAIRS="$pairs_csv"
+            local num_pairs
+            num_pairs=$(awk -F, '{print NF}' <<< "${pairs_csv}")
+            (( num_pairs > 0 )) && MEMBER_LEAVES_PER_PAIR=$((mleaf_total / num_pairs))
+        fi
     fi
 }
 
 ###############################################################################
 # load cached config + prompt
 ###############################################################################
+DC_COUNT=""
 SPINE_COUNT=""
 LEAF_COUNT=""
 MLAG_PAIRS=""
@@ -97,6 +139,7 @@ load_config
 # Discard cached topology params: they're only restored if the user picks an
 # existing topology file below (which we then parse). A fresh serial prefix
 # always gets fresh prompts.
+DC_COUNT=""
 SPINE_COUNT=""
 LEAF_COUNT=""
 MLAG_PAIRS=""
@@ -151,6 +194,7 @@ fi
 # is the default; when creating new, the serial prefix is. Always re-prompt
 # so the user can change it either way.
 prompt_with_current HOSTNAME_PREFIX "Hostname prefix" "${SERIAL_PREFIX}"
+prompt_with_current DC_COUNT        "Number of datacenters (1-${MAX_DC})" "1"
 
 TODAY="$(date +%Y-%m-%d)"
 if [[ -n "${EXISTING_FILE}" ]]; then
@@ -160,8 +204,25 @@ else
 fi
 OUT_NAME="${OUT_FILE##*/}"
 
-prompt_with_current SPINE_COUNT "Number of spines"                  "${DEFAULT_SPINES}"
-prompt_with_current LEAF_COUNT  "Number of leaves"                  "${DEFAULT_LEAVES}"
+# Validate DC_COUNT first — it affects the limits for subsequent params.
+if ! [[ "${DC_COUNT}" =~ ^[1-${MAX_DC}]$ ]]; then
+    echo "ERROR: datacenter count must be 1-${MAX_DC}, got '${DC_COUNT}'." >&2
+    exit 1
+fi
+
+# Tighten per-DC limits when multi-DC (62-address block per DC).
+if (( DC_COUNT > 1 )); then
+    MAX_LEAVES=${MAX_LEAVES_MULTI}
+    MAX_TOTAL_MEMBER_LEAVES=${MAX_TOTAL_MEMBER_LEAVES_MULTI}
+fi
+
+if (( DC_COUNT > 1 )); then
+    prompt_with_current SPINE_COUNT "Spines per DC"                         "${DEFAULT_SPINES}"
+    prompt_with_current LEAF_COUNT  "Leaves per DC"                         "${DEFAULT_LEAVES}"
+else
+    prompt_with_current SPINE_COUNT "Number of spines"                      "${DEFAULT_SPINES}"
+    prompt_with_current LEAF_COUNT  "Number of leaves"                      "${DEFAULT_LEAVES}"
+fi
 prompt_with_current MLAG_PAIRS  "Pair leaves into MLAG pairs (y/n)" "n"
 
 # validate counts + prefixes
@@ -274,7 +335,11 @@ if [[ -n "${EXISTING_FILE}" ]]; then
 else
     echo "Will write ${OUT_NAME}"
 fi
-echo "  ${SPINE_COUNT} spine(s), ${LEAF_COUNT} leaf/leaves${member_note}, EOS ${EOS_VERSION}, full mesh${mlag_note}"
+if (( DC_COUNT > 1 )); then
+    echo "  ${DC_COUNT} datacenter(s), ${SPINE_COUNT} spine(s)/DC, ${LEAF_COUNT} leaf/leaves/DC, 2 border leaves/DC, 2 backbone routers${member_note}, EOS ${EOS_VERSION}, full mesh${mlag_note}"
+else
+    echo "  ${SPINE_COUNT} spine(s), ${LEAF_COUNT} leaf/leaves${member_note}, EOS ${EOS_VERSION}, full mesh${mlag_note}"
+fi
 # If we're creating new but the target name happens to already exist
 # (re-running on the same day without picking it from the menu), warn.
 if [[ -z "${EXISTING_FILE}" && -e "${OUT_FILE}" ]]; then
@@ -287,7 +352,7 @@ case "${ans}" in [Yy]*) ;; *) echo "Aborted."; exit 1 ;; esac
 ###############################################################################
 # emit the YAML
 ###############################################################################
-{
+emit_yaml_header() {
     cat <<HEADER
 ###############################################################################
 # Generated by generate.sh on ${TODAY}.
@@ -304,20 +369,26 @@ veos:
   username: cvpadmin
   password: cvp123!
   version: ${EOS_VERSION}
-  # Required for CVaaS: every vEOS needs outbound internet to reach
-  # apiserver.arista.io. This toolkit targets CVaaS (not on-prem CVP, which
-  # ACT can stand up locally), so we always enable it.
   internet_access: true
 
 nodes:
-
-  ###########################################################################
-  # Spines
-  ###########################################################################
 HEADER
+}
 
-    for (( i=1; i<=SPINE_COUNT; i++ )); do
-        cat <<NODE
+if (( DC_COUNT == 1 )); then
+    ###########################################################################
+    # Single-DC — identical to original output
+    ###########################################################################
+    {
+        emit_yaml_header
+
+        echo ""
+        echo "  ###########################################################################"
+        echo "  # Spines"
+        echo "  ###########################################################################"
+
+        for (( i=1; i<=SPINE_COUNT; i++ )); do
+            cat <<NODE
 
   - ${HOSTNAME_PREFIX}-spine${i}:
       node_type: veos
@@ -326,17 +397,15 @@ HEADER
       system_mac_address: 00:1c:73:00:01:$(printf '%02x' "${i}")
       ztp: false
 NODE
-    done
+        done
 
-    cat <<'LEAFHEADER'
+        echo ""
+        echo "  ###########################################################################"
+        echo "  # Leaves"
+        echo "  ###########################################################################"
 
-  ###########################################################################
-  # Leaves
-  ###########################################################################
-LEAFHEADER
-
-    for (( i=1; i<=LEAF_COUNT; i++ )); do
-        cat <<NODE
+        for (( i=1; i<=LEAF_COUNT; i++ )); do
+            cat <<NODE
 
   - ${HOSTNAME_PREFIX}-leaf${i}:
       node_type: veos
@@ -345,21 +414,18 @@ LEAFHEADER
       system_mac_address: 00:1c:73:00:02:$(printf '%02x' "${i}")
       ztp: false
 NODE
-    done
+        done
 
-    # Member leaves (L2 access, dual-homed into a leaf MLAG pair)
-    if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
-        cat <<'MHEADER'
-
-  ###########################################################################
-  # Member leaves (L2 access, dual-homed to a leaf pair)
-  ###########################################################################
-MHEADER
-        mleaf_idx=0
-        for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
-            for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
-                mleaf_idx=$((mleaf_idx + 1))
-                cat <<NODE
+        if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+            echo ""
+            echo "  ###########################################################################"
+            echo "  # Member leaves (L2 access, dual-homed to a leaf pair)"
+            echo "  ###########################################################################"
+            mleaf_idx=0
+            for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
+                for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
+                    mleaf_idx=$((mleaf_idx + 1))
+                    cat <<NODE
 
   - ${HOSTNAME_PREFIX}-mleaf${mleaf_idx}:
       node_type: veos
@@ -368,12 +434,12 @@ MHEADER
       system_mac_address: 00:1c:73:00:03:$(printf '%02x' "${mleaf_idx}")
       ztp: false
 NODE
+                done
             done
-        done
-    fi
+        fi
 
-    if [[ "${MLAG_PAIRS}" == "y" ]]; then
-        cat <<'LINKHEADER'
+        if [[ "${MLAG_PAIRS}" == "y" ]]; then
+            cat <<'LINKHEADER'
 
 ###############################################################################
 # Data-plane links
@@ -385,8 +451,8 @@ NODE
 ###############################################################################
 links:
 LINKHEADER
-    else
-        cat <<'LINKHEADER'
+        else
+            cat <<'LINKHEADER'
 
 ###############################################################################
 # Data-plane links (spine <-> leaf full mesh)
@@ -394,51 +460,244 @@ LINKHEADER
 ###############################################################################
 links:
 LINKHEADER
-    fi
-
-    # Spine <-> leaf full mesh
-    for (( s=1; s<=SPINE_COUNT; s++ )); do
-        for (( l=1; l<=LEAF_COUNT; l++ )); do
-            echo "  - connection: [${HOSTNAME_PREFIX}-spine${s}:Ethernet${l}, ${HOSTNAME_PREFIX}-leaf${l}:Ethernet${s}]"
-        done
-        if (( s < SPINE_COUNT )); then
-            echo ""
         fi
-    done
 
-    # MLAG peer links: two cables between each (leaf<odd>, leaf<even>) pair,
-    # using the next two free ports after the spine uplinks.
-    if [[ "${MLAG_PAIRS}" == "y" ]]; then
-        mlag_port_a=$((SPINE_COUNT + 1))
-        mlag_port_b=$((SPINE_COUNT + 2))
-        echo ""
-        echo "  # MLAG peer links"
-        for (( i=1; i<=LEAF_COUNT; i+=2 )); do
-            j=$((i + 1))
-            echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_a}]"
-            echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_b}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_b}]"
-        done
-    fi
-
-    # Member-leaf uplinks: each member leaf's Eth1/Eth2 dual-home to the
-    # odd/even leaves of its pair. Leaf ports start at SPINE_COUNT+3 (after
-    # spine uplinks and MLAG peer links) and step up by one per member leaf.
-    if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
-        echo ""
-        echo "  # Member-leaf uplinks"
-        mleaf_idx=0
-        for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
-            odd=$((2 * pair - 1))
-            even=$((2 * pair))
-            for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
-                mleaf_idx=$((mleaf_idx + 1))
-                up_port=$((SPINE_COUNT + 2 + m))
-                echo "  - connection: [${HOSTNAME_PREFIX}-mleaf${mleaf_idx}:Ethernet1, ${HOSTNAME_PREFIX}-leaf${odd}:Ethernet${up_port}]"
-                echo "  - connection: [${HOSTNAME_PREFIX}-mleaf${mleaf_idx}:Ethernet2, ${HOSTNAME_PREFIX}-leaf${even}:Ethernet${up_port}]"
+        for (( s=1; s<=SPINE_COUNT; s++ )); do
+            for (( l=1; l<=LEAF_COUNT; l++ )); do
+                echo "  - connection: [${HOSTNAME_PREFIX}-spine${s}:Ethernet${l}, ${HOSTNAME_PREFIX}-leaf${l}:Ethernet${s}]"
             done
+            (( s < SPINE_COUNT )) && echo ""
         done
-    fi
-} > "${OUT_FILE}"
+
+        if [[ "${MLAG_PAIRS}" == "y" ]]; then
+            mlag_port_a=$((SPINE_COUNT + 1))
+            mlag_port_b=$((SPINE_COUNT + 2))
+            echo ""
+            echo "  # MLAG peer links"
+            for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+                j=$((i + 1))
+                echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_a}]"
+                echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_b}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_b}]"
+            done
+        fi
+
+        if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+            echo ""
+            echo "  # Member-leaf uplinks"
+            mleaf_idx=0
+            for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
+                odd=$((2 * pair - 1))
+                even=$((2 * pair))
+                for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
+                    mleaf_idx=$((mleaf_idx + 1))
+                    up_port=$((SPINE_COUNT + 2 + m))
+                    echo "  - connection: [${HOSTNAME_PREFIX}-mleaf${mleaf_idx}:Ethernet1, ${HOSTNAME_PREFIX}-leaf${odd}:Ethernet${up_port}]"
+                    echo "  - connection: [${HOSTNAME_PREFIX}-mleaf${mleaf_idx}:Ethernet2, ${HOSTNAME_PREFIX}-leaf${even}:Ethernet${up_port}]"
+                done
+            done
+        fi
+    } > "${OUT_FILE}"
+
+else
+    ###########################################################################
+    # Multi-DC — backbone + per-DC EVPN domains
+    ###########################################################################
+    {
+        emit_yaml_header
+
+        # --- Backbone routers ---
+        echo ""
+        echo "  ###########################################################################"
+        echo "  # Backbone routers (IP transport between EVPN domains)"
+        echo "  ###########################################################################"
+
+        for (( n=1; n<=2; n++ )); do
+            cat <<NODE
+
+  - ${HOSTNAME_PREFIX}-bb${n}:
+      node_type: veos
+      ip_addr: 192.168.0.$((1 + n))/24
+      serial_number: ${SERIAL_PREFIX}-bb${n}
+      system_mac_address: 00:1c:73:00:05:$(printf '%02x' "${n}")
+      ztp: false
+NODE
+        done
+
+        # --- Per-DC nodes ---
+        for (( d=0; d<DC_COUNT; d++ )); do
+            L="${DC_LETTERS[d]}"
+            base=$((4 + d * 62))
+            dc_mac_octet=$(printf '%02x' "$((d + 1))")
+
+            # Border leaves
+            echo ""
+            echo "  ###########################################################################"
+            echo "  # Datacenter ${L} — Border leaves"
+            echo "  ###########################################################################"
+
+            for (( b=1; b<=2; b++ )); do
+                cat <<NODE
+
+  - ${HOSTNAME_PREFIX}-${L}-border${b}:
+      node_type: veos
+      ip_addr: 192.168.0.$((base + b - 1))/24
+      serial_number: ${SERIAL_PREFIX}-${L}-border${b}
+      system_mac_address: 00:1c:73:${dc_mac_octet}:04:$(printf '%02x' "${b}")
+      ztp: false
+NODE
+            done
+
+            # Spines
+            echo ""
+            echo "  ###########################################################################"
+            echo "  # Datacenter ${L} — Spines"
+            echo "  ###########################################################################"
+
+            for (( i=1; i<=SPINE_COUNT; i++ )); do
+                cat <<NODE
+
+  - ${HOSTNAME_PREFIX}-${L}-spine${i}:
+      node_type: veos
+      ip_addr: 192.168.0.$((base + 2 + i - 1))/24
+      serial_number: ${SERIAL_PREFIX}-${L}-spine${i}
+      system_mac_address: 00:1c:73:${dc_mac_octet}:01:$(printf '%02x' "${i}")
+      ztp: false
+NODE
+            done
+
+            # Leaves
+            echo ""
+            echo "  ###########################################################################"
+            echo "  # Datacenter ${L} — Leaves"
+            echo "  ###########################################################################"
+
+            for (( i=1; i<=LEAF_COUNT; i++ )); do
+                cat <<NODE
+
+  - ${HOSTNAME_PREFIX}-${L}-leaf${i}:
+      node_type: veos
+      ip_addr: 192.168.0.$((base + 11 + i - 1))/24
+      serial_number: ${SERIAL_PREFIX}-${L}-leaf${i}
+      system_mac_address: 00:1c:73:${dc_mac_octet}:02:$(printf '%02x' "${i}")
+      ztp: false
+NODE
+            done
+
+            # Member leaves (per-DC, indices reset each DC)
+            if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+                echo ""
+                echo "  ###########################################################################"
+                echo "  # Datacenter ${L} — Member leaves"
+                echo "  ###########################################################################"
+                mleaf_idx=0
+                for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
+                    for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
+                        mleaf_idx=$((mleaf_idx + 1))
+                        cat <<NODE
+
+  - ${HOSTNAME_PREFIX}-${L}-mleaf${mleaf_idx}:
+      node_type: veos
+      ip_addr: 192.168.0.$((base + 50 + mleaf_idx - 1))/24
+      serial_number: ${SERIAL_PREFIX}-${L}-mleaf${mleaf_idx}
+      system_mac_address: 00:1c:73:${dc_mac_octet}:03:$(printf '%02x' "${mleaf_idx}")
+      ztp: false
+NODE
+                    done
+                done
+            fi
+        done
+
+        # --- Links ---
+        cat <<'LINKHEADER'
+
+###############################################################################
+# Data-plane links
+###############################################################################
+links:
+LINKHEADER
+
+        # Per-DC links
+        for (( d=0; d<DC_COUNT; d++ )); do
+            L="${DC_LETTERS[d]}"
+
+            # Spine <-> leaf full mesh
+            echo ""
+            echo "  # Datacenter ${L} — spine <-> leaf full mesh"
+            for (( s=1; s<=SPINE_COUNT; s++ )); do
+                for (( l=1; l<=LEAF_COUNT; l++ )); do
+                    echo "  - connection: [${HOSTNAME_PREFIX}-${L}-spine${s}:Ethernet${l}, ${HOSTNAME_PREFIX}-${L}-leaf${l}:Ethernet${s}]"
+                done
+            done
+
+            # Leaf MLAG peer links
+            if [[ "${MLAG_PAIRS}" == "y" ]]; then
+                mlag_port_a=$((SPINE_COUNT + 1))
+                mlag_port_b=$((SPINE_COUNT + 2))
+                echo ""
+                echo "  # Datacenter ${L} — leaf MLAG peer links"
+                for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+                    j=$((i + 1))
+                    echo "  - connection: [${HOSTNAME_PREFIX}-${L}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-${L}-leaf${j}:Ethernet${mlag_port_a}]"
+                    echo "  - connection: [${HOSTNAME_PREFIX}-${L}-leaf${i}:Ethernet${mlag_port_b}, ${HOSTNAME_PREFIX}-${L}-leaf${j}:Ethernet${mlag_port_b}]"
+                done
+            fi
+
+            # Member-leaf uplinks
+            if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+                echo ""
+                echo "  # Datacenter ${L} — member-leaf uplinks"
+                mleaf_idx=0
+                for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
+                    odd=$((2 * pair - 1))
+                    even=$((2 * pair))
+                    for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
+                        mleaf_idx=$((mleaf_idx + 1))
+                        up_port=$((SPINE_COUNT + 2 + m))
+                        echo "  - connection: [${HOSTNAME_PREFIX}-${L}-mleaf${mleaf_idx}:Ethernet1, ${HOSTNAME_PREFIX}-${L}-leaf${odd}:Ethernet${up_port}]"
+                        echo "  - connection: [${HOSTNAME_PREFIX}-${L}-mleaf${mleaf_idx}:Ethernet2, ${HOSTNAME_PREFIX}-${L}-leaf${even}:Ethernet${up_port}]"
+                    done
+                done
+            fi
+
+            # Border <-> spine links
+            echo ""
+            echo "  # Datacenter ${L} — border <-> spine"
+            for (( s=1; s<=SPINE_COUNT; s++ )); do
+                echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${s}, ${HOSTNAME_PREFIX}-${L}-spine${s}:Ethernet$((LEAF_COUNT + 1))]"
+                echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border2:Ethernet${s}, ${HOSTNAME_PREFIX}-${L}-spine${s}:Ethernet$((LEAF_COUNT + 2))]"
+            done
+
+            # Border MLAG peer links
+            bl_mlag_a=$((SPINE_COUNT + 1))
+            bl_mlag_b=$((SPINE_COUNT + 2))
+            echo ""
+            echo "  # Datacenter ${L} — border MLAG peer"
+            echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${bl_mlag_a}, ${HOSTNAME_PREFIX}-${L}-border2:Ethernet${bl_mlag_a}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${bl_mlag_b}, ${HOSTNAME_PREFIX}-${L}-border2:Ethernet${bl_mlag_b}]"
+        done
+
+        # Backbone interconnect — border <-> backbone
+        echo ""
+        echo "  # Backbone — border <-> backbone"
+        for (( d=0; d<DC_COUNT; d++ )); do
+            L="${DC_LETTERS[d]}"
+            bl_bb1_port=$((SPINE_COUNT + 3))
+            bl_bb2_port=$((SPINE_COUNT + 4))
+            bb_port_1=$((2 * d + 1))
+            bb_port_2=$((2 * d + 2))
+            echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${bl_bb1_port}, ${HOSTNAME_PREFIX}-bb1:Ethernet${bb_port_1}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border2:Ethernet${bl_bb1_port}, ${HOSTNAME_PREFIX}-bb1:Ethernet${bb_port_2}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${bl_bb2_port}, ${HOSTNAME_PREFIX}-bb2:Ethernet${bb_port_1}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border2:Ethernet${bl_bb2_port}, ${HOSTNAME_PREFIX}-bb2:Ethernet${bb_port_2}]"
+        done
+
+        # Backbone peer link
+        bb_peer_port=$((2 * DC_COUNT + 1))
+        echo ""
+        echo "  # Backbone peer link"
+        echo "  - connection: [${HOSTNAME_PREFIX}-bb1:Ethernet${bb_peer_port}, ${HOSTNAME_PREFIX}-bb2:Ethernet${bb_peer_port}]"
+    } > "${OUT_FILE}"
+fi
 
 echo
 echo "Wrote ${OUT_NAME}"
@@ -450,28 +709,23 @@ PNG_FILE="${OUT_FILE%.yml}.png"
 PNG_NAME="${PNG_FILE##*/}"
 
 if command -v dot >/dev/null 2>&1; then
-    diagram_title="${SERIAL_PREFIX}: ${SPINE_COUNT} spine × ${LEAF_COUNT} leaf"
-    [[ "${MLAG_PAIRS}" == "y" ]] && diagram_title+=" (MLAG)"
-    if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
-        total_member=$(( MEMBER_LEAVES_PER_PAIR * ${#MEMBER_LEAF_PAIRS_ARRAY[@]} ))
-        diagram_title+=" + ${total_member} member"
-    fi
 
-    if {
+    generate_dot_single_dc() {
+        local diagram_title="${SERIAL_PREFIX}: ${SPINE_COUNT} spine × ${LEAF_COUNT} leaf"
+        [[ "${MLAG_PAIRS}" == "y" ]] && diagram_title+=" (MLAG)"
+        if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+            local total_member=$(( MEMBER_LEAVES_PER_PAIR * ${#MEMBER_LEAF_PAIRS_ARRAY[@]} ))
+            diagram_title+=" + ${total_member} member"
+        fi
+
         echo 'digraph topology {'
         echo "  label=\"${diagram_title}\";"
-        echo '  labelloc="t";'
-        echo '  fontname="Helvetica";'
-        echo '  fontsize=16;'
-        echo '  rankdir=TB;'
-        echo '  splines=line;'
-        echo '  nodesep=0.4;'
-        echo '  ranksep=1.0;'
+        echo '  labelloc="t"; fontname="Helvetica"; fontsize=16;'
+        echo '  rankdir=TB; splines=line; nodesep=0.4; ranksep=1.0;'
         echo '  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11];'
         echo '  edge [dir=none, penwidth=1.2];'
         echo ''
 
-        # Spines on the top rank
         printf '  { rank=same;'
         for (( s=1; s<=SPINE_COUNT; s++ )); do
             printf ' spine%d [label="%s-spine%d\\n192.168.0.%d", fillcolor="#dbeafe"];' \
@@ -479,7 +733,6 @@ if command -v dot >/dev/null 2>&1; then
         done
         echo ' }'
 
-        # Leaves on the middle rank
         printf '  { rank=same;'
         for (( l=1; l<=LEAF_COUNT; l++ )); do
             printf ' leaf%d [label="%s-leaf%d\\n192.168.0.%d", fillcolor="#fef3c7"];' \
@@ -487,10 +740,9 @@ if command -v dot >/dev/null 2>&1; then
         done
         echo ' }'
 
-        # Member leaves on the bottom rank
         if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
             printf '  { rank=same;'
-            mleaf_idx=0
+            local mleaf_idx=0
             for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
                 for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
                     mleaf_idx=$((mleaf_idx + 1))
@@ -502,15 +754,12 @@ if command -v dot >/dev/null 2>&1; then
         fi
         echo ''
 
-        # Spine <-> leaf full mesh
         for (( s=1; s<=SPINE_COUNT; s++ )); do
             for (( l=1; l<=LEAF_COUNT; l++ )); do
                 echo "  spine${s} -> leaf${l};"
             done
         done
 
-        # MLAG peer links (dashed red, constraint=false so they don't pull
-        # the leaves out of rank).
         if [[ "${MLAG_PAIRS}" == "y" ]]; then
             echo ''
             for (( i=1; i<=LEAF_COUNT; i+=2 )); do
@@ -519,13 +768,12 @@ if command -v dot >/dev/null 2>&1; then
             done
         fi
 
-        # Member-leaf uplinks (each mleaf -> the two leaves of its pair)
         if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
             echo ''
-            mleaf_idx=0
+            local mleaf_idx=0
             for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
-                odd=$((2 * pair - 1))
-                even=$((2 * pair))
+                local odd=$((2 * pair - 1))
+                local even=$((2 * pair))
                 for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
                     mleaf_idx=$((mleaf_idx + 1))
                     echo "  leaf${odd} -> mleaf${mleaf_idx};"
@@ -535,7 +783,142 @@ if command -v dot >/dev/null 2>&1; then
         fi
 
         echo '}'
-    } | dot -Tpng -o "${PNG_FILE}" 2>/dev/null; then
+    }
+
+    generate_dot_multi_dc() {
+        local diagram_title="${SERIAL_PREFIX}: ${DC_COUNT} DC × (${SPINE_COUNT} spine × ${LEAF_COUNT} leaf"
+        [[ "${MLAG_PAIRS}" == "y" ]] && diagram_title+=" MLAG"
+        diagram_title+=") + backbone"
+
+        echo 'digraph topology {'
+        echo "  label=\"${diagram_title}\";"
+        echo '  labelloc="t"; fontname="Helvetica"; fontsize=18;'
+        echo '  rankdir=TB; compound=true; splines=true;'
+        echo '  nodesep=0.3; ranksep=0.8;'
+        echo '  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10];'
+        echo '  edge [dir=none, penwidth=1.0];'
+        echo ''
+
+        # Backbone nodes at the top
+        printf '  { rank=min;'
+        printf ' bb1 [label="%s-bb1\\n192.168.0.2", fillcolor="#d1fae5"];' "${HOSTNAME_PREFIX}"
+        printf ' bb2 [label="%s-bb2\\n192.168.0.3", fillcolor="#d1fae5"];' "${HOSTNAME_PREFIX}"
+        echo ' }'
+        echo ''
+
+        # Per-DC subgraph clusters
+        for (( d=0; d<DC_COUNT; d++ )); do
+            local L="${DC_LETTERS[d]}"
+            local base=$((4 + d * 62))
+
+            echo "  subgraph cluster_${L} {"
+            echo "    label=\"Datacenter ${L}\"; style=\"rounded,dashed\"; color=\"#6b7280\";"
+            echo "    fontname=\"Helvetica-Bold\"; fontsize=13; margin=12;"
+            echo ''
+
+            # Border leaves
+            printf '    { rank=same;'
+            for (( b=1; b<=2; b++ )); do
+                printf ' %s_border%d [label="%s-%s-border%d\\n.%d", fillcolor="#ede9fe"];' \
+                    "${L}" "${b}" "${HOSTNAME_PREFIX}" "${L}" "${b}" "$((base + b - 1))"
+            done
+            echo ' }'
+
+            # Spines
+            printf '    { rank=same;'
+            for (( s=1; s<=SPINE_COUNT; s++ )); do
+                printf ' %s_spine%d [label="%s-%s-spine%d\\n.%d", fillcolor="#dbeafe"];' \
+                    "${L}" "${s}" "${HOSTNAME_PREFIX}" "${L}" "${s}" "$((base + 2 + s - 1))"
+            done
+            echo ' }'
+
+            # Leaves
+            printf '    { rank=same;'
+            for (( l=1; l<=LEAF_COUNT; l++ )); do
+                printf ' %s_leaf%d [label="%s-%s-leaf%d\\n.%d", fillcolor="#fef3c7"];' \
+                    "${L}" "${l}" "${HOSTNAME_PREFIX}" "${L}" "${l}" "$((base + 11 + l - 1))"
+            done
+            echo ' }'
+
+            # Member leaves
+            if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+                printf '    { rank=same;'
+                local mleaf_idx=0
+                for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
+                    for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
+                        mleaf_idx=$((mleaf_idx + 1))
+                        printf ' %s_mleaf%d [label="%s-%s-mleaf%d\\n.%d", fillcolor="#fce7f3"];' \
+                            "${L}" "${mleaf_idx}" "${HOSTNAME_PREFIX}" "${L}" "${mleaf_idx}" "$((base + 50 + mleaf_idx - 1))"
+                    done
+                done
+                echo ' }'
+            fi
+            echo ''
+
+            # Intra-DC edges: border <-> spine
+            for (( s=1; s<=SPINE_COUNT; s++ )); do
+                echo "    ${L}_border1 -> ${L}_spine${s};"
+                echo "    ${L}_border2 -> ${L}_spine${s};"
+            done
+
+            # Spine <-> leaf mesh
+            for (( s=1; s<=SPINE_COUNT; s++ )); do
+                for (( l=1; l<=LEAF_COUNT; l++ )); do
+                    echo "    ${L}_spine${s} -> ${L}_leaf${l};"
+                done
+            done
+
+            # MLAG peers (leaves)
+            if [[ "${MLAG_PAIRS}" == "y" ]]; then
+                for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+                    j=$((i + 1))
+                    echo "    ${L}_leaf${i} -> ${L}_leaf${j} [style=dashed, color=\"#dc2626\", penwidth=1.5, constraint=false];"
+                done
+            fi
+
+            # Border MLAG peer
+            echo "    ${L}_border1 -> ${L}_border2 [style=dashed, color=\"#dc2626\", penwidth=1.5, constraint=false];"
+
+            # Member-leaf uplinks
+            if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
+                local mleaf_idx=0
+                for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
+                    local odd=$((2 * pair - 1))
+                    local even=$((2 * pair))
+                    for (( m=1; m<=MEMBER_LEAVES_PER_PAIR; m++ )); do
+                        mleaf_idx=$((mleaf_idx + 1))
+                        echo "    ${L}_leaf${odd} -> ${L}_mleaf${mleaf_idx};"
+                        echo "    ${L}_leaf${even} -> ${L}_mleaf${mleaf_idx};"
+                    done
+                done
+            fi
+
+            echo "  }"
+            echo ''
+        done
+
+        # Cross-DC edges: border <-> backbone
+        for (( d=0; d<DC_COUNT; d++ )); do
+            local L="${DC_LETTERS[d]}"
+            echo "  ${L}_border1 -> bb1 [color=\"#059669\", penwidth=1.5];"
+            echo "  ${L}_border2 -> bb1 [color=\"#059669\", penwidth=1.5];"
+            echo "  ${L}_border1 -> bb2 [color=\"#059669\", penwidth=1.5];"
+            echo "  ${L}_border2 -> bb2 [color=\"#059669\", penwidth=1.5];"
+        done
+
+        # Backbone peer
+        echo "  bb1 -> bb2 [style=dashed, color=\"#059669\", penwidth=2, constraint=false];"
+
+        echo '}'
+    }
+
+    if (( DC_COUNT == 1 )); then
+        dot_generator=generate_dot_single_dc
+    else
+        dot_generator=generate_dot_multi_dc
+    fi
+
+    if ${dot_generator} | dot -Tpng -o "${PNG_FILE}" 2>/dev/null; then
         echo "Wrote ${PNG_NAME}"
     else
         echo "WARNING: graphviz failed to render ${PNG_NAME}; YAML is unaffected." >&2
