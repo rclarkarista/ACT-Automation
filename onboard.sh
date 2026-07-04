@@ -54,7 +54,7 @@ MAX_PARALLEL="${PARALLELISM:-4}"
 # subshells, so they need to live in the environment. SNIPPET, LOG_DIR, and
 # updated EOS_PASS are exported here too — bash carries the export attribute
 # forward, so later assignments propagate automatically.
-export EOS_USER EOS_PASS CVAAS_HOST CVAAS_PORT SNIPPET LOG_DIR
+export EOS_USER EOS_PASS CVAAS_HOST CVAAS_PORT SNIPPET LOG_DIR CVAAS_USER
 
 ###############################################################################
 # validate_cvaas_token <token>
@@ -225,7 +225,22 @@ show agent TerminAttr logs" > "${log}" 2>&1 || true
     fi
 }
 
-export -f ssh_eos preflight_worker paste_worker postcheck_worker
+useradd_worker() {
+    local host=$1 ip=$2
+    local log="${LOG_DIR}/${host}.useradd.log"
+    local user_snippet="enable
+conf
+username ${CVAAS_USER} priv 15 secret cvp123!
+wr"
+    if ssh_eos "${ip}" <<< "${user_snippet}" > "${log}" 2>&1; then
+        touch "${log}.ok"
+        printf "  %-30s  %-16s  ok\n" "${host}" "${ip}"
+    else
+        printf "  %-30s  %-16s  FAILED (see %s)\n" "${host}" "${ip}" "${log}"
+    fi
+}
+
+export -f ssh_eos preflight_worker paste_worker postcheck_worker useradd_worker
 
 ###############################################################################
 # fanout <worker-name> — read DEVICES on stdin (tab-separated host\tip lines)
@@ -247,6 +262,7 @@ ACT_TENANT=""
 ACT_USER=""
 ACT_API_KEY=""
 CVAAS_TOKEN=""
+CVAAS_USER=""
 
 load_config
 
@@ -263,8 +279,9 @@ prompt ACT_API_KEY "ACT API key"                              secret
 echo
 echo "CVaaS onboarding:"
 prompt CVAAS_TOKEN "CVaaS enrollment token"                   secret
+prompt CVAAS_USER  "Your CVaaS username"
 
-for v in ACT_TENANT ACT_USER ACT_API_KEY CVAAS_TOKEN; do
+for v in ACT_TENANT ACT_USER ACT_API_KEY CVAAS_TOKEN CVAAS_USER; do
     if [[ -z "${!v}" ]]; then
         echo "ERROR: ${v} is required and cannot be blank." >&2
         exit 1
@@ -553,6 +570,43 @@ if (( ${#FAILED[@]} > 0 )); then
     echo "Paste this snippet into them manually:"
     echo "${SNIPPET}"
     exit 1
+fi
+
+###############################################################################
+# provision CVaaS user on each device so the first change control succeeds.
+# The user account matches CVAAS_USER with privilege 15 and a fixed password.
+###############################################################################
+echo
+echo "Adding CVaaS user '${CVAAS_USER}' (priv 15) to each switch (parallel ${MAX_PARALLEL}-wide)..."
+echo "------------------------------------------------------------------------"
+fanout useradd_worker <<< "${DEVICES}"
+echo "------------------------------------------------------------------------"
+
+USERADD_FAILED=()
+while IFS=$'\t' read -r host ip; do
+    [[ -z "$host" ]] && continue
+    [[ -f "${LOG_DIR}/${host}.useradd.log.ok" ]] || USERADD_FAILED+=("${host}")
+done <<< "${DEVICES}"
+
+if (( ${#USERADD_FAILED[@]} > 0 )); then
+    echo
+    echo "Retrying ${#USERADD_FAILED[@]} failed device(s) serially..."
+    echo "------------------------------------------------------------------------"
+    STILL_USERADD_FAILED=()
+    for host in "${USERADD_FAILED[@]}"; do
+        ip=$(awk -F'\t' -v h="$host" '$1 == h { print $2 }' <<< "${DEVICES}")
+        rm -f "${LOG_DIR}/${host}.useradd.log.ok"
+        useradd_worker "$host" "$ip"
+        [[ -f "${LOG_DIR}/${host}.useradd.log.ok" ]] || STILL_USERADD_FAILED+=("${host}")
+    done
+    echo "------------------------------------------------------------------------"
+    USERADD_FAILED=("${STILL_USERADD_FAILED[@]+"${STILL_USERADD_FAILED[@]}"}")
+fi
+
+if (( ${#USERADD_FAILED[@]} > 0 )); then
+    echo
+    echo "WARNING: could not add user '${CVAAS_USER}' to: ${USERADD_FAILED[*]}"
+    echo "Add manually: conf → username ${CVAAS_USER} priv 15 secret cvp123! → wr"
 fi
 
 ###############################################################################

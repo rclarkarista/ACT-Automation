@@ -6,3 +6,6 @@
 
 # VSCode Workspace
 ACT Automation.code-workspace
+
+# Any topology files
+topology*
