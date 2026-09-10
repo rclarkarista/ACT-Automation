@@ -371,6 +371,9 @@ veos:
   version: ${EOS_VERSION}
   internet_access: true
 
+settings:
+  legacy_eos_versioning: false
+
 nodes:
 HEADER
 }

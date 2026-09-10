@@ -158,6 +158,15 @@ CVaaS supports two onboarding paths:
 For an ACT lab where you have SSH access to every device the moment it
 boots, the second path is dramatically simpler.
 
+## Note on Upgrading
+
+Without the setting below, you cannot upgrade EOS nodes in ACT through CloudVision. This setting is baked into every yaml template to allow you to demo upgrades via. CVaaS.
+
+```
+settings:
+   legacy_eos_versioning: false
+```
+
 ## v2 / TODO
 
 - Drive ACT topology deploy / undeploy from the API directly (in progress
