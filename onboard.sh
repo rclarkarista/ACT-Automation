@@ -39,8 +39,11 @@ EOS_USER="cvpadmin"
 EOS_PASS=""
 EOS_PASS_DEFAULT="cvp123!"
 
-CVAAS_HOST="apiserver.arista.io"
+CVAAS_HOST=""
 CVAAS_PORT="443"
+CVAAS_HOST_PROD="apiserver.arista.io"
+CVAAS_URL_STAGING="www.cv-staging.corp.arista.io"
+CVAAS_HOST_STAGING="apiserver.cv-staging.corp.arista.io"
 
 # Per-phase concurrency. Conservative default — ACT's outbound NAT and
 # per-vEOS readiness timing can cause transient failures when too many
@@ -278,6 +281,29 @@ prompt ACT_API_KEY "ACT API key"                              secret
 
 echo
 echo "CVaaS onboarding:"
+echo "CVaaS environment:"
+echo "  1) Production  (${CVAAS_HOST_PROD})"
+echo "  2) Staging     (${CVAAS_URL_STAGING})"
+echo "  3) Custom URL"
+while true; do
+    read -r -p "Select CVaaS environment [1-3]: " cv_env_choice
+    case "${cv_env_choice}" in
+        1) CVAAS_HOST="${CVAAS_HOST_PROD}"; break ;;
+        2) CVAAS_HOST="${CVAAS_HOST_STAGING}"; break ;;
+        3)
+            read -r -p "Enter CVaaS host (e.g. mycvaas.example.com): " custom_host
+            if [[ -z "${custom_host}" ]]; then
+                echo "  Host cannot be blank."
+            else
+                CVAAS_HOST="${custom_host}"
+                break
+            fi
+            ;;
+        *) echo "  Invalid choice." ;;
+    esac
+done
+echo "Using CVaaS host: ${CVAAS_HOST}"
+echo
 prompt CVAAS_TOKEN "CVaaS enrollment token"                   secret
 prompt CVAAS_USER  "Your CVaaS username"
 
@@ -310,7 +336,7 @@ enable
 bash echo "${CVAAS_TOKEN}" > /tmp/cv-onboarding-token
 configure
 daemon TerminAttr
-   exec /usr/bin/TerminAttr -smashexcludes=ale,flexCounter,hardware,kni,pulse,strata -cvaddr=apiserver.arista.io:443 -cvauth=token-secure,/tmp/cv-onboarding-token -taillogs
+   exec /usr/bin/TerminAttr -smashexcludes=ale,flexCounter,hardware,kni,pulse,strata -cvaddr=${CVAAS_HOST}:${CVAAS_PORT} -cvauth=token-secure,/tmp/cv-onboarding-token -taillogs
    shutdown
    no shutdown
 end
