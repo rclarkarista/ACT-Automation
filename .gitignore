@@ -9,3 +9,6 @@ ACT Automation.code-workspace
 
 # Any topology files
 topology*
+
+# Agent/superpowers scaffolding (not part of this repo)
+docs/superpowers/
