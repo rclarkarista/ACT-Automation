@@ -43,12 +43,15 @@ EOS_PASS_DEFAULT="cvp123!"
 
 # CVaaS/TerminAttr target. Defaults applied after load_config so a cached
 # staging/custom value wins; empty/missing falls back to production.
+# CVAAS_URL_STAGING is display-only (browser UI); TerminAttr uses the
+# apiserver host below.
 CVAAS_HOST=""
 CVAAS_PORT=""
 CVAAS_PROD_HOST="apiserver.arista.io"
 CVAAS_PROD_PORT="443"
 CVAAS_STAGING_HOST="apiserver.cv-staging.corp.arista.io"
 CVAAS_STAGING_PORT="443"
+CVAAS_URL_STAGING="www.cv-staging.corp.arista.io"
 
 # Per-phase concurrency. Conservative default — ACT's outbound NAT and
 # per-vEOS readiness timing can cause transient failures when too many
@@ -186,7 +189,7 @@ prompt_cvaas_target() {
     while true; do
         echo
         echo "  1) production — ${CVAAS_PROD_HOST}:${CVAAS_PROD_PORT}"
-        echo "  2) staging    — ${CVAAS_STAGING_HOST}:${CVAAS_STAGING_PORT}"
+        echo "  2) staging    — ${CVAAS_STAGING_HOST}:${CVAAS_STAGING_PORT} (UI: ${CVAAS_URL_STAGING})"
         echo "  3) custom     — enter host:port"
         read -r -p "  Choice [1-3, Enter keeps ${label}]: " choice
         if [[ -z "${choice}" ]]; then
