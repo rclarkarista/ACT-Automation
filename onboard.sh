@@ -281,27 +281,36 @@ prompt ACT_API_KEY "ACT API key"                              secret
 
 echo
 echo "CVaaS onboarding:"
-echo "CVaaS environment:"
-echo "  1) Production  (${CVAAS_HOST_PROD})"
-echo "  2) Staging     (${CVAAS_URL_STAGING})"
-echo "  3) Custom URL"
-while true; do
-    read -r -p "Select CVaaS environment [1-3]: " cv_env_choice
-    case "${cv_env_choice}" in
-        1) CVAAS_HOST="${CVAAS_HOST_PROD}"; break ;;
-        2) CVAAS_HOST="${CVAAS_HOST_STAGING}"; break ;;
-        3)
-            read -r -p "Enter CVaaS host (e.g. mycvaas.example.com): " custom_host
-            if [[ -z "${custom_host}" ]]; then
-                echo "  Host cannot be blank."
-            else
-                CVAAS_HOST="${custom_host}"
-                break
-            fi
-            ;;
-        *) echo "  Invalid choice." ;;
+if [[ -n "${CVAAS_HOST}" ]]; then
+    echo "CVaaS environment: ${CVAAS_HOST} (cached)"
+    read -r -p "Change it? [y/N] " change_env
+    case "${change_env}" in
+        [Yy]*) CVAAS_HOST="" ;;
     esac
-done
+fi
+if [[ -z "${CVAAS_HOST}" ]]; then
+    echo "CVaaS environment:"
+    echo "  1) Production  (${CVAAS_HOST_PROD})"
+    echo "  2) Staging     (${CVAAS_URL_STAGING})"
+    echo "  3) Custom URL"
+    while true; do
+        read -r -p "Select CVaaS environment [1-3]: " cv_env_choice
+        case "${cv_env_choice}" in
+            1) CVAAS_HOST="${CVAAS_HOST_PROD}"; break ;;
+            2) CVAAS_HOST="${CVAAS_HOST_STAGING}"; break ;;
+            3)
+                read -r -p "Enter CVaaS host (e.g. mycvaas.example.com): " custom_host
+                if [[ -z "${custom_host}" ]]; then
+                    echo "  Host cannot be blank."
+                else
+                    CVAAS_HOST="${custom_host}"
+                    break
+                fi
+                ;;
+            *) echo "  Invalid choice." ;;
+        esac
+    done
+fi
 echo "Using CVaaS host: ${CVAAS_HOST}"
 echo
 prompt CVAAS_TOKEN "CVaaS enrollment token"                   secret
