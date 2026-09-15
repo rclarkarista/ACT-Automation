@@ -11,11 +11,19 @@ Using ACT with CVaaS can be painful for a few reasons:
 
 This script aims to solve those problems by assigning a static MAC & serial to every device (`generate.sh` script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
 
+## When should I use it? ⏱️
+
+Do you need a **long-lived ACT environment** to demo or test? Do you need a **quick topology** to demo something live? Do you just want to **test** a specific EOS version quickly? Do you want to practice the **Campus Fabric** or **L3LS/EVPN Studios**?
+
+> Then YES, this is for you!!  🫵
+
+This is *not* a tool to build any possible iteration of a network topology in ACT. It has intentional limits that coorelate with the **Campus Fabric** & **L3LS Studios**. 
+
 ## Quickstart 🏎️
 > [!NOTE]
 > This has been built & tested on a Mac, if running on a PC, follow the steps below.
 
-### PC Users
+### PC Users 🪟
 
 Install graphviz and set your terminal to Git Bash in order for this to work:
 

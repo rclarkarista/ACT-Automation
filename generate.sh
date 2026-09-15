@@ -21,12 +21,12 @@ DEFAULT_SPINES=2
 DEFAULT_LEAVES=4
 DEFAULT_EOS_VERSION="4.35.4M"
 DEFAULT_MEMBER_LEAVES_PER_PAIR=2
+MAX_MEMBER_LEAVES_PER_PAIR=5
 
 MAX_DC=4
 MAX_SPINES=9
 MAX_LEAVES=99                      # single-DC: IPs 192.168.0.21-.119
 MAX_LEAVES_MULTI=39                # multi-DC: per-DC IP block has room for 39
-MAX_MEMBER_LEAVES_PER_PAIR=9
 MAX_TOTAL_MEMBER_LEAVES=100        # single-DC: IPs 192.168.0.131-.230
 MAX_TOTAL_MEMBER_LEAVES_MULTI=12   # multi-DC: per-DC IP block has room for 12
 
@@ -250,8 +250,7 @@ case "${MLAG_PAIRS}" in
     *) echo "ERROR: MLAG choice must be y or n, got '${MLAG_PAIRS}'." >&2; exit 1 ;;
 esac
 if [[ "${MLAG_PAIRS}" == "y" ]] && (( LEAF_COUNT % 2 != 0 )); then
-    echo "ERROR: MLAG pairing requires an even number of leaves (got ${LEAF_COUNT})." >&2
-    exit 1
+    echo "NOTE: odd leaf count — leaves 1-$((LEAF_COUNT - 1)) will be MLAG-paired, leaf ${LEAF_COUNT} will be standalone."
 fi
 
 # Member leaves: L2 access switches dual-homed to a leaf pair. Only an option
@@ -265,7 +264,7 @@ if [[ "${MLAG_PAIRS}" == "y" ]]; then
     case "${ADD_MEMBER_LEAVES}" in
         [Yy]|[Yy][Ee][Ss])
             pair_max=$((LEAF_COUNT / 2))
-            prompt_with_current MEMBER_LEAF_PAIRS      "Which leaf pair(s) get member leaves? (1-${pair_max}, comma-separated)" ""
+            prompt_with_current MEMBER_LEAF_PAIRS      "Which leaf pair(s) get member leaves? (1-${pair_max}, e.g. 1,2 or 1-${pair_max})" ""
             prompt_with_current MEMBER_LEAVES_PER_PAIR "Member leaves per selected pair"   "${DEFAULT_MEMBER_LEAVES_PER_PAIR}"
             ;;
         *)
@@ -286,9 +285,27 @@ MEMBER_LEAF_PAIRS_ARRAY=()
 if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
     pair_max=$((LEAF_COUNT / 2))
     IFS=',' read -ra _raw_pairs <<< "${MEMBER_LEAF_PAIRS}"
+    # Expand ranges (e.g. "1-3" → "1" "2" "3") so users can type either style.
+    _expanded_pairs=()
+    for token in "${_raw_pairs[@]}"; do
+        token="${token// /}"
+        [[ -z "$token" ]] && continue
+        if [[ "$token" =~ ^([1-9][0-9]*)-([1-9][0-9]*)$ ]]; then
+            range_start="${BASH_REMATCH[1]}" range_end="${BASH_REMATCH[2]}"
+            if (( range_start > range_end )); then
+                echo "ERROR: invalid range '${token}' (start > end)." >&2
+                exit 1
+            fi
+            for (( r=range_start; r<=range_end; r++ )); do
+                _expanded_pairs+=("$r")
+            done
+        else
+            _expanded_pairs+=("$token")
+        fi
+    done
     # Bash 3.2 has no associative arrays, so dedup via a delimited string.
     _seen_csv=""
-    for p in "${_raw_pairs[@]}"; do
+    for p in "${_expanded_pairs[@]}"; do
         p="${p// /}"
         [[ -z "$p" ]] && continue
         if ! [[ "$p" =~ ^[1-9][0-9]*$ ]] || (( p < 1 || p > pair_max )); then
@@ -322,7 +339,13 @@ echo
 # confirm before writing
 ###############################################################################
 mlag_note=""
-[[ "${MLAG_PAIRS}" == "y" ]] && mlag_note=", MLAG-paired leaves"
+if [[ "${MLAG_PAIRS}" == "y" ]]; then
+    if (( LEAF_COUNT % 2 != 0 )); then
+        mlag_note=", MLAG-paired leaves (leaf${LEAF_COUNT} standalone)"
+    else
+        mlag_note=", MLAG-paired leaves"
+    fi
+fi
 
 member_note=""
 if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
@@ -477,7 +500,7 @@ LINKHEADER
             mlag_port_b=$((SPINE_COUNT + 2))
             echo ""
             echo "  # MLAG peer links"
-            for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+            for (( i=1; i<LEAF_COUNT; i+=2 )); do
                 j=$((i + 1))
                 echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_a}]"
                 echo "  - connection: [${HOSTNAME_PREFIX}-leaf${i}:Ethernet${mlag_port_b}, ${HOSTNAME_PREFIX}-leaf${j}:Ethernet${mlag_port_b}]"
@@ -638,7 +661,7 @@ LINKHEADER
                 mlag_port_b=$((SPINE_COUNT + 2))
                 echo ""
                 echo "  # Datacenter ${L} — leaf MLAG peer links"
-                for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+                for (( i=1; i<LEAF_COUNT; i+=2 )); do
                     j=$((i + 1))
                     echo "  - connection: [${HOSTNAME_PREFIX}-${L}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-${L}-leaf${j}:Ethernet${mlag_port_a}]"
                     echo "  - connection: [${HOSTNAME_PREFIX}-${L}-leaf${i}:Ethernet${mlag_port_b}, ${HOSTNAME_PREFIX}-${L}-leaf${j}:Ethernet${mlag_port_b}]"
@@ -765,7 +788,7 @@ if command -v dot >/dev/null 2>&1; then
 
         if [[ "${MLAG_PAIRS}" == "y" ]]; then
             echo ''
-            for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+            for (( i=1; i<LEAF_COUNT; i+=2 )); do
                 j=$((i + 1))
                 echo "  leaf${i} -> leaf${j} [style=dashed, color=\"#dc2626\", penwidth=2, constraint=false];"
             done
@@ -873,7 +896,7 @@ if command -v dot >/dev/null 2>&1; then
 
             # MLAG peers (leaves)
             if [[ "${MLAG_PAIRS}" == "y" ]]; then
-                for (( i=1; i<=LEAF_COUNT; i+=2 )); do
+                for (( i=1; i<LEAF_COUNT; i+=2 )); do
                     j=$((i + 1))
                     echo "    ${L}_leaf${i} -> ${L}_leaf${j} [style=dashed, color=\"#dc2626\", penwidth=1.5, constraint=false];"
                 done
