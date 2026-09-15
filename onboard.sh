@@ -8,12 +8,14 @@
 # Workflow:
 #   1. Prompts (once, cached in .config) for:
 #        ACT_TENANT, ACT_USER, ACT_API_KEY
-#        CVAAS_TOKEN
-#   2. Lists your Running labs via the ACT API.
+#        CVAAS_TOKEN, CVAAS_USER
+#   2. Optionally customize CVaaS/TerminAttr target (production / staging /
+#      custom host:port); choice cached as CVAAS_HOST + CVAAS_PORT.
+#   3. Lists your Running labs via the ACT API.
 #        - 0 running -> tells you to deploy/start one in the ACT UI.
 #        - 1 running -> uses it.
 #        - 2+ running -> prompts you to pick.
-#   3. SSH-pastes the TerminAttr onboarding snippet to every vEOS device in
+#   4. SSH-pastes the TerminAttr onboarding snippet to every vEOS device in
 #      the chosen lab. They appear in CVaaS Inventory within ~1 minute.
 #
 # Because each switch's serial_number is pinned in the topology file (see
@@ -39,11 +41,17 @@ EOS_USER="cvpadmin"
 EOS_PASS=""
 EOS_PASS_DEFAULT="cvp123!"
 
+# CVaaS/TerminAttr target. Defaults applied after load_config so a cached
+# staging/custom value wins; empty/missing falls back to production.
+# CVAAS_URL_STAGING is display-only (browser UI); TerminAttr uses the
+# apiserver host below.
 CVAAS_HOST=""
-CVAAS_PORT="443"
-CVAAS_HOST_PROD="apiserver.arista.io"
+CVAAS_PORT=""
+CVAAS_PROD_HOST="apiserver.arista.io"
+CVAAS_PROD_PORT="443"
+CVAAS_STAGING_HOST="apiserver.cv-staging.corp.arista.io"
+CVAAS_STAGING_PORT="443"
 CVAAS_URL_STAGING="www.cv-staging.corp.arista.io"
-CVAAS_HOST_STAGING="apiserver.cv-staging.corp.arista.io"
 
 # Per-phase concurrency. Conservative default — ACT's outbound NAT and
 # per-vEOS readiness timing can cause transient failures when too many
@@ -122,6 +130,96 @@ validate_cvaas_token() {
         echo "CVaaS token: valid (expires in ${hours}h)"
     fi
     return 0
+}
+
+###############################################################################
+# cvaas_target_label — production | staging | custom from current host/port
+###############################################################################
+cvaas_target_label() {
+    if [[ "${CVAAS_HOST}" == "${CVAAS_PROD_HOST}" && "${CVAAS_PORT}" == "${CVAAS_PROD_PORT}" ]]; then
+        printf '%s' "production"
+    elif [[ "${CVAAS_HOST}" == "${CVAAS_STAGING_HOST}" && "${CVAAS_PORT}" == "${CVAAS_STAGING_PORT}" ]]; then
+        printf '%s' "staging"
+    else
+        printf '%s' "custom"
+    fi
+}
+
+###############################################################################
+# parse_cvaas_addr <host[:port]>
+#   Sets CVAAS_HOST / CVAAS_PORT. Split on the last ':'; default port 443.
+#   Returns 1 if host would be empty.
+###############################################################################
+parse_cvaas_addr() {
+    local addr=$1
+    local host port
+    if [[ "${addr}" == *:* ]]; then
+        host="${addr%:*}"
+        port="${addr##*:}"
+    else
+        host="${addr}"
+        port="443"
+    fi
+    if [[ -z "${host}" || -z "${port}" ]]; then
+        return 1
+    fi
+    CVAAS_HOST="${host}"
+    CVAAS_PORT="${port}"
+    return 0
+}
+
+###############################################################################
+# prompt_cvaas_target
+#   Show current target; ask y/N to customize. On yes: production / staging /
+#   custom menu with Enter keeping the current selection.
+###############################################################################
+prompt_cvaas_target() {
+    local ans choice addr
+    local label
+    label=$(cvaas_target_label)
+
+    echo
+    echo "  CVaaS target: ${CVAAS_HOST}:${CVAAS_PORT} (${label})"
+    read -r -p "  Customize CVaaS/TerminAttr target? [y/N] " ans
+    case "${ans}" in
+        y|Y|yes|YES) ;;
+        *) return 0 ;;
+    esac
+
+    while true; do
+        echo
+        echo "  1) production — ${CVAAS_PROD_HOST}:${CVAAS_PROD_PORT}"
+        echo "  2) staging    — ${CVAAS_STAGING_HOST}:${CVAAS_STAGING_PORT} (UI: ${CVAAS_URL_STAGING})"
+        echo "  3) custom     — enter host:port"
+        read -r -p "  Choice [1-3, Enter keeps ${label}]: " choice
+        if [[ -z "${choice}" ]]; then
+            return 0
+        fi
+        case "${choice}" in
+            1)
+                CVAAS_HOST="${CVAAS_PROD_HOST}"
+                CVAAS_PORT="${CVAAS_PROD_PORT}"
+                return 0
+                ;;
+            2)
+                CVAAS_HOST="${CVAAS_STAGING_HOST}"
+                CVAAS_PORT="${CVAAS_STAGING_PORT}"
+                return 0
+                ;;
+            3)
+                while true; do
+                    read -r -p "  Custom CVaaS address (host:port): " addr
+                    if parse_cvaas_addr "${addr}"; then
+                        return 0
+                    fi
+                    echo "  ERROR: enter a non-empty host (optional :port, default 443)." >&2
+                done
+                ;;
+            *)
+                echo "  ERROR: pick 1, 2, 3, or Enter." >&2
+                ;;
+        esac
+    done
 }
 
 ###############################################################################
@@ -281,29 +379,6 @@ prompt ACT_API_KEY "ACT API key"                              secret
 
 echo
 echo "CVaaS onboarding:"
-echo "CVaaS environment:"
-echo "  1) Production  (${CVAAS_HOST_PROD})"
-echo "  2) Staging     (${CVAAS_URL_STAGING})"
-echo "  3) Custom URL"
-while true; do
-    read -r -p "Select CVaaS environment [1-3]: " cv_env_choice
-    case "${cv_env_choice}" in
-        1) CVAAS_HOST="${CVAAS_HOST_PROD}"; break ;;
-        2) CVAAS_HOST="${CVAAS_HOST_STAGING}"; break ;;
-        3)
-            read -r -p "Enter CVaaS host (e.g. mycvaas.example.com): " custom_host
-            if [[ -z "${custom_host}" ]]; then
-                echo "  Host cannot be blank."
-            else
-                CVAAS_HOST="${custom_host}"
-                break
-            fi
-            ;;
-        *) echo "  Invalid choice." ;;
-    esac
-done
-echo "Using CVaaS host: ${CVAAS_HOST}"
-echo
 prompt CVAAS_TOKEN "CVaaS enrollment token"                   secret
 prompt CVAAS_USER  "Your CVaaS username"
 
@@ -323,6 +398,12 @@ if ! validate_cvaas_token "${CVAAS_TOKEN}"; then
     echo "(Cleared cached CVaaS token; re-run with a fresh one.)" >&2
     exit 1
 fi
+
+# Apply production defaults if .config had no host/port (or an empty wipe
+# from another script's save_config). Then optionally retarget.
+[[ -z "${CVAAS_HOST}" ]] && CVAAS_HOST="${CVAAS_PROD_HOST}"
+[[ -z "${CVAAS_PORT}" ]] && CVAAS_PORT="${CVAAS_PROD_PORT}"
+prompt_cvaas_target
 
 save_config
 echo
