@@ -928,7 +928,55 @@ if command -v dot >/dev/null 2>&1; then
         rm -f "${PNG_FILE}"
     fi
 else
-    echo "(install graphviz to get a topology PNG: brew install graphviz)"
+    echo
+    echo "Graphviz is not installed — it's needed to render the topology diagram."
+    read -r -p "Would you like to install it now? [y/N] " install_gv
+    case "${install_gv}" in
+        [Yy]*)
+            case "$(uname -s)" in
+                Darwin)
+                    if command -v brew >/dev/null 2>&1; then
+                        echo "Installing graphviz via Homebrew..."
+                        brew install graphviz
+                    else
+                        echo "ERROR: Homebrew not found. Install it from https://brew.sh then run:" >&2
+                        echo "  brew install graphviz" >&2
+                    fi
+                    ;;
+                MINGW*|MSYS*|CYGWIN*|*_NT*)
+                    if command -v winget >/dev/null 2>&1; then
+                        echo "Installing graphviz via winget..."
+                        winget install --id Graphviz.Graphviz --accept-source-agreements --accept-package-agreements
+                    else
+                        echo "ERROR: winget not found. Install graphviz manually from https://graphviz.org/download/" >&2
+                    fi
+                    ;;
+                *)
+                    echo "ERROR: unsupported OS ($(uname -s)). Install graphviz manually from https://graphviz.org/download/" >&2
+                    ;;
+            esac
+
+            if command -v dot >/dev/null 2>&1; then
+                echo
+                if (( DC_COUNT == 1 )); then
+                    dot_generator=generate_dot_single_dc
+                else
+                    dot_generator=generate_dot_multi_dc
+                fi
+                if ${dot_generator} | dot -Tpng -o "${PNG_FILE}" 2>/dev/null; then
+                    echo "Wrote ${PNG_NAME}"
+                else
+                    echo "WARNING: graphviz failed to render ${PNG_NAME}; YAML is unaffected." >&2
+                    rm -f "${PNG_FILE}"
+                fi
+            else
+                echo "graphviz still not found in PATH — you may need to restart your shell."
+            fi
+            ;;
+        *)
+            echo "Skipping diagram. You can install graphviz later and re-run to get the PNG."
+            ;;
+    esac
 fi
 
 echo "Next:  upload + deploy in the ACT UI, then run ./onboard.sh"
