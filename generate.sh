@@ -194,7 +194,7 @@ fi
 # is the default; when creating new, the serial prefix is. Always re-prompt
 # so the user can change it either way.
 prompt_with_current HOSTNAME_PREFIX "Hostname prefix" "${SERIAL_PREFIX}"
-prompt_with_current DC_COUNT        "Number of datacenters (1-${MAX_DC})" "1"
+prompt_with_current DC_COUNT        "Number of datacenters/campuses (1-${MAX_DC})" "1"
 
 TODAY="$(date +%Y-%m-%d)"
 if [[ -n "${EXISTING_FILE}" ]]; then

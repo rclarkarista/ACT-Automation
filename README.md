@@ -17,11 +17,14 @@ This script aims to solve those problems by assigning a static MAC & serial to e
 
 ### PC Users
 
-Set your terminal to Git Bash in order for this to work:
+Install graphviz and set your terminal to Git Bash in order for this to work:
 
-1. In the VS Code terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
-2. Select **Git Bash** from the dropdown menu.
-3. Once the new terminal loads continue to **step 3** below. 
+1. Install `graphviz` in Powershell and add it to your path
+   1. `winget install -e --id Graphviz.Graphviz`
+   2. `export PATH=$PATH:"/c/Program Files/Graphviz/bin"`
+2. Open VS Code, in the terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
+3. Select **Git Bash** from the dropdown menu.
+4. Once the new terminal loads continue to **step 3** below. 
 
 ### Create a new simple ACT Topology
 
@@ -36,12 +39,14 @@ Set your terminal to Git Bash in order for this to work:
 ./generate.sh
 #   Serial prefix (e.g. bsmith): rclark
 #   Hostname prefix [rclark]:
+#   Number of datacenters/campuses (1-4) [1]:
 #   Number of spines [2]:
 #   Number of leaves [4]:
 #   Pair leaves into MLAG pairs (y/n) [n]:
-#   EOS version [4.32.2F]:
+#   EOS version [4.35.4M]:
 #   Continue? [y/N] y
-#   Wrote topology-rclark-2026-05-21.yml
+#   Wrote topology-rclark-2026-09-15.yml
+#   Wrote topology-rclark-2026-09-15.png
 ```
 
 ### Once you created a lab (or you have one running) already
