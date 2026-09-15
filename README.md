@@ -13,7 +13,15 @@ This script aims to solve those problems by assigning a static MAC & serial to e
 
 ## Quickstart 🏎️
 > [!NOTE]
-> This has been built & tested on a Mac, mileage may vary on PC.
+> This has been built & tested on a Mac, if running on a PC, follow the steps below.
+
+### PC Users
+
+Set your terminal to Git Bash in order for this to work:
+
+1. In the VS Code terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
+2. Select **Git Bash** from the dropdown menu.
+3. Once the new terminal loads continue to **step 3** below. 
 
 ### Create a new simple ACT Topology
 
