@@ -6,10 +6,10 @@ An automated **CVaaS onboarding tool** & **ACT lab creator** for EOS devices run
 
 Using ACT with CVaaS can be painful for a few reasons: 
 
-1. If you need to change a *single link* or add/remove a node, the entire lab must be **destroyed and recreated**. CVaaS knows devices by their serial & system MAC.
+1. If you need to change a *single link* or add/remove a node, the entire lab must be **destroyed and recreated**. 
 2. Automating a system that has ZTP configuration necessary to tie EOS devices to CVaaS must be re-deployed every time a topology change is made. Painful.
 
-This script aims to solve those problems by assigning a static MAC & serial to every device (`generate.sh` script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
+This script aims to solve those problems by assigning a **static MAC** & **serial** to every device (`generate.sh` script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
 
 ## When should I use it? ⏱️
 
@@ -32,7 +32,7 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
    2. `export PATH=$PATH:"/c/Program Files/Graphviz/bin"`
 2. Open VS Code, in the terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
 3. Select **Git Bash** from the dropdown menu.
-4. Once the new terminal loads continue to **step 3** below. 
+4. Once the new terminal loads continue below. 
 
 ### Create a new simple ACT Topology
 
