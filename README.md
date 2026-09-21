@@ -23,6 +23,20 @@ This is *not* a tool to build any possible iteration of a network topology in AC
 > [!NOTE]
 > This has been built & tested on a Mac, if running on a PC, follow the steps below.
 
+## MacOS Users 🍎
+If you don't have Brew installed, check this URL https://brew.sh/. 
+
+On your laptop:
+- `jq`, `sshpass`. Install the non-defaults with:
+  ```bash
+  brew install jq hudochenkov/sshpass/sshpass
+  ```
+- (Optional) `graphviz` — if installed, `generate.sh` also emits a PNG
+  diagram to upload with your topology file in ACT alongside the YAML:
+  ```bash
+  brew install graphviz
+  ```
+
 ### PC Users 🪟
 
 Install graphviz and set your terminal to Git Bash in order for this to work:
@@ -112,19 +126,6 @@ No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 | `topology-<prefix>-<YYYY-MM-DD>.yml` | Topology produced by `generate.sh`. Filename must be unique across the ACT tenant — `generate.sh` enforces the convention. |
 | `.config`     | Auto-generated cache of your answers. **gitignored.** Delete to re-prompt. |
 
-## Prerequisites
-
-On your laptop:
-- `bash`, `curl`, `jq`, `sshpass`. Install the non-defaults with:
-  ```bash
-  brew install jq hudochenkov/sshpass/sshpass
-  # bash + curl ship with macOS
-  ```
-- (Optional) `graphviz` — if installed, `generate.sh` also emits a PNG
-  diagram to upload with your topology file in ACT alongside the YAML:
-  ```bash
-  brew install graphviz
-  ```
 
 ## Redeploying
 
