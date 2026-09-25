@@ -54,8 +54,8 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 2. Open a terminal and move to that directory
 3. Run the `./generate.sh` script
 4. Answer the prompts to build a simple topology you can use in ACT
-5. Upload the generated topo file to ACT + deploy your topology in the ACT UI
-6. Wait for Running state
+5. Upload the generated topology with `./act_topology.sh <topology-file>`
+6. Deploy your topology in the ACT UI and wait for Running state
 
 ```bash
 ./generate.sh
@@ -70,6 +70,24 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 #   Wrote topology-rclark-2026-09-15.yml
 #   Wrote topology-rclark-2026-09-15.png
 ```
+
+Upload the generated YAML to the ACT account associated with your API key:
+
+```bash
+./act_topology.sh topology-rclark-2026-09-15.yml
+#   Topology validation passed: 6 nodes, 8 links.
+#   Topology name [topology-rclark-2026-09-15.yml]:
+#   ACT tenant [CE]:
+#   ACT API key: ****  (36 chars)
+#   Created ACT topology 'topology-rclark-2026-09-15.yml'.
+```
+
+The script validates the YAML structure and link references before prompting
+for a topology name, using the complete YAML filename as the default. It then
+waits for ACT's asynchronous validation and creation operation to complete.
+The API key is saved as `ACT_API_KEY` in a gitignored `.env` file with
+permissions `0600`. If no topology file is provided, the script lists the
+generated topology files and prompts you to select one.
 
 ### Once you created a lab (or you have one running) already
 
@@ -104,15 +122,15 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 
 ## How this works ⚙️
 
-Two scripts, run in order:
+Three scripts, run in order:
 
 | Step | Script | What it does |
 | ---- | ------ | ------------ |
 | 1 *(optional)* | `./generate.sh` | Interactively generates a topology YAML with **pinned `serial_number` + `system_mac_address`** on every node. Skip this step if you already have a topology — `onboard.sh` works with any vEOS topology, not just generated ones.  |
-| 2 | `./onboard.sh` | Finds your Running lab via the ACT API and SSH-pastes the TerminAttr onboarding snippet to every vEOS switch. Auto-detects the EOS password from the topology's `veos:` block, so it works with topologies you authored elsewhere. |
+| 2 | `./act_topology.sh` | Uploads a generated topology to the ACT account associated with the supplied API key using `actrac`. |
+| 3 | `./onboard.sh` | Finds your Running lab via the ACT API and SSH-pastes the TerminAttr onboarding snippet to every vEOS switch. Auto-detects the EOS password from the topology's `veos:` block, so it works with topologies you authored elsewhere. |
 
-Between the two (if you ran step 1): upload + deploy the generated
-topology in the ACT UI.
+After uploading, deploy the generated topology in the ACT UI.
 
 No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 
@@ -122,9 +140,11 @@ No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 | ---- | ------- |
 | `onboard.sh`  | Lists your Running labs and onboards every vEOS switch to CVaaS. |
 | `generate.sh` | *(optional)* Interactive topology generator with pinned serials + MACs. Asks for a serial prefix; caches spine/leaf counts, MLAG choice, and EOS version. |
-| `_common.sh`  | Shared helpers (prompt/cache/tool-check). Sourced by both scripts; don't run directly. |
+| `act_topology.sh` | Validates and uploads a generated topology to ACT using `actrac`, waits for creation to complete, and saves the prompted API key in `.env`. |
+| `_common.sh`  | Shared helpers (prompt/cache/tool-check). Sourced by the scripts; don't run directly. |
 | `topology-<prefix>-<YYYY-MM-DD>.yml` | Topology produced by `generate.sh`. Filename must be unique across the ACT tenant — `generate.sh` enforces the convention. |
 | `.config`     | Auto-generated cache of your answers. **gitignored.** Delete to re-prompt. |
+| `.env` | Stores `ACT_API_KEY` after `act_topology.sh` prompts for it. **gitignored.** |
 
 
 ## Redeploying
@@ -135,7 +155,7 @@ When you want to change the topology:
    change spine/leaf counts as needed (the new file has today's date in
    its name, so it won't overwrite your previous labs). For
    hand-authored topologies, edit in place.
-2. Upload + deploy in the ACT UI. Either create a new lab or overwrite your existing.
+2. Run `./act_topology.sh <topology-file>`, then deploy in the ACT UI. Either create a new lab or overwrite your existing.
 3. Run `./onboard.sh` and pick the new lab from the list.
 
 If the topology has pinned `serial_number` + `system_mac_address` on
