@@ -9,3 +9,6 @@ ACT Automation.code-workspace
 
 # Any topology files
 topology*
+
+# Environment files
+.env

@@ -8,8 +8,8 @@
 # topology with pinned serial_number + system_mac_address on every node so
 # CVaaS keeps device identity across redeploys.
 #
-# After running this, upload + deploy the file in the ACT UI, then run
-# ./onboard.sh to push the CVaaS onboarding config.
+# After running this, upload the file with act_topology.sh, deploy it in the
+# ACT UI, then run onboard.sh to push the CVaaS onboarding config.
 ###############################################################################
 
 set -euo pipefail
@@ -1002,4 +1002,4 @@ else
     esac
 fi
 
-echo "Next:  upload + deploy in the ACT UI, then run ./onboard.sh"
+echo "Next:  run ./act_topology.sh ${OUT_NAME}, deploy in the ACT UI, then run ./onboard.sh"
