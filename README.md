@@ -7,7 +7,7 @@ An automated **CVaaS onboarding tool** & **ACT lab creator** for EOS devices run
 Using ACT with CVaaS can be painful for a few reasons: 
 
 1. If you need to change a *single link* or add/remove a node, the entire lab must be **destroyed and recreated**. 
-2. Automating a system that has ZTP configuration necessary to tie EOS devices to CVaaS must be re-deployed every time a topology change is made. Painful.
+2. Automating a VM that has ZTP configuration & connectivity necessary to tie EOS devices to CVaaS must be re-deployed every time a topology change is made. Painful.
 
 This script aims to solve those problems by assigning a **static MAC** & **serial** to every device (`generate.sh` script) and by automatically discovering, SSH-ing into and pasting the onboarding token into every EOS device to simplify new/existing devices showing up in CVaaS. 
 

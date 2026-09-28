@@ -57,7 +57,7 @@ MAX_PARALLEL="${PARALLELISM:-4}"
 # subshells, so they need to live in the environment. SNIPPET, LOG_DIR, and
 # updated EOS_PASS are exported here too — bash carries the export attribute
 # forward, so later assignments propagate automatically.
-export EOS_USER EOS_PASS CVAAS_HOST CVAAS_PORT SNIPPET LOG_DIR CVAAS_USER
+export EOS_USER EOS_PASS CVAAS_HOST CVAAS_PORT SNIPPET LOG_DIR CVAAS_USER _ASKPASS_HELPER
 
 ###############################################################################
 # validate_cvaas_token <token>
@@ -173,12 +173,21 @@ extract_veos_hostnames() {
 ###############################################################################
 ssh_eos() {
     local ip=$1
-    sshpass -p "${EOS_PASS}" ssh \
-        -o StrictHostKeyChecking=no \
-        -o UserKnownHostsFile=/dev/null \
-        -o LogLevel=ERROR \
-        -o ConnectTimeout=10 \
-        "${EOS_USER}@${ip}"
+    if command -v sshpass >/dev/null 2>&1; then
+        sshpass -p "${EOS_PASS}" ssh \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o LogLevel=ERROR \
+            -o ConnectTimeout=10 \
+            "${EOS_USER}@${ip}"
+    else
+        SSH_ASKPASS="${_ASKPASS_HELPER}" SSH_ASKPASS_REQUIRE=force DISPLAY=dummy:0 \
+            ssh -o StrictHostKeyChecking=no \
+                -o UserKnownHostsFile=/dev/null \
+                -o LogLevel=ERROR \
+                -o ConnectTimeout=10 \
+                "${EOS_USER}@${ip}"
+    fi
 }
 
 ###############################################################################
@@ -271,7 +280,7 @@ load_config
 
 # Fail fast on missing tools — before we collect creds the user would otherwise
 # have to re-enter on the next attempt.
-require_tools curl jq sshpass
+require_tools curl jq
 
 echo
 echo "ACT API access:"
@@ -470,6 +479,21 @@ if [[ -n "${EOS_PASS}" ]]; then
 else
     EOS_PASS="${EOS_PASS_DEFAULT}"
     echo "EOS password: could not auto-detect from topology; defaulting to ${EOS_PASS_DEFAULT}"
+fi
+
+# When sshpass is not installed (common on Windows / Git Bash), create a
+# helper script that SSH_ASKPASS can call to provide the password. The helper
+# reads EOS_PASS from the environment (already exported) so it stays in sync
+# without embedding the password in the file.
+if ! command -v sshpass >/dev/null 2>&1; then
+    _ASKPASS_HELPER=$(mktemp "${TMPDIR:-/tmp}/askpass-XXXXXX")
+    cat > "${_ASKPASS_HELPER}" <<'ASKEOF'
+#!/bin/sh
+printf '%s\n' "${EOS_PASS}"
+ASKEOF
+    chmod 700 "${_ASKPASS_HELPER}"
+    trap 'rm -f "${_ASKPASS_HELPER}"' EXIT
+    echo "Note: sshpass not found; using built-in SSH_ASKPASS fallback (no extra install needed)."
 fi
 
 # Filter ${DEVICES} to only nodes the topology declares as `node_type: veos`.

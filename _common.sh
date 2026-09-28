@@ -145,12 +145,40 @@ require_tools() {
     if (( ${#missing[@]} > 0 )); then
         echo "ERROR: missing required tools: ${missing[*]}" >&2
         echo "       Install hints:" >&2
-        for t in "${missing[@]}"; do
-            case "$t" in
-                sshpass) echo "         brew install hudochenkov/sshpass/sshpass" >&2 ;;
-                *)       echo "         brew install ${t}" >&2 ;;
-            esac
-        done
+        case "${OSTYPE:-}" in
+            msys*|mingw*|cygwin*)
+                for t in "${missing[@]}"; do
+                    case "$t" in
+                        jq)
+                            echo "         Download jq.exe from https://jqlang.github.io/jq/download/" >&2
+                            echo "         and copy it to your Git Bash usr/bin folder, e.g.:" >&2
+                            echo "           cp jq.exe /usr/bin/jq.exe" >&2
+                            echo "         Or if you have a package manager:" >&2
+                            echo "           choco install jq        (Chocolatey)" >&2
+                            echo "           winget install jqlang.jq" >&2
+                            ;;
+                        sshpass)
+                            echo "         sshpass has no native Windows package." >&2
+                            echo "         Recommended: run this script in WSL instead of Git Bash:" >&2
+                            echo "           wsl --install          (one-time, from PowerShell)" >&2
+                            echo "           wsl                    (launch Linux shell)" >&2
+                            echo "           sudo apt install jq sshpass" >&2
+                            ;;
+                        *)
+                            echo "         Install ${t} via Chocolatey, winget, or download manually" >&2
+                            ;;
+                    esac
+                done
+                ;;
+            *)
+                for t in "${missing[@]}"; do
+                    case "$t" in
+                        sshpass) echo "         brew install hudochenkov/sshpass/sshpass" >&2 ;;
+                        *)       echo "         brew install ${t}" >&2 ;;
+                    esac
+                done
+                ;;
+        esac
         exit 1
     fi
 }
