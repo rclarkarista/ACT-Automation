@@ -44,9 +44,11 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 1. Install `graphviz` in Powershell and add it to your path
    1. `winget install -e --id Graphviz.Graphviz`
    2. `export PATH=$PATH:"/c/Program Files/Graphviz/bin"`
-2. Open VS Code, in the terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
-3. Select **Git Bash** from the dropdown menu.
-4. Once the new terminal loads continue below. 
+2. Install `jq` (required to SSH to ACT EOS devices)
+   1. `winget install jqlang.jq`
+3. Open VS Code, in the terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
+4. Select **Git Bash** from the dropdown menu.
+5. Once the new terminal loads continue below. 
 
 ### Create a new simple ACT Topology
 
