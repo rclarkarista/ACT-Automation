@@ -1002,4 +1002,4 @@ else
     esac
 fi
 
-echo "Next:  upload + deploy in the ACT UI, then run ./onboard.sh"
+echo "Next:  run ./act_topology.sh ${OUT_NAME}, then run ./onboard.sh"

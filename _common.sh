@@ -157,6 +157,14 @@ require_tools() {
                             echo "           choco install jq        (Chocolatey)" >&2
                             echo "           winget install jqlang.jq" >&2
                             ;;
+                        yq)
+                            echo "         Download yq.exe from https://github.com/mikefarah/yq/releases" >&2
+                            echo "         and copy it to your Git Bash usr/bin folder, e.g.:" >&2
+                            echo "           cp yq.exe /usr/bin/yq.exe" >&2
+                            echo "         Or if you have a package manager:" >&2
+                            echo "           choco install yq        (Chocolatey)" >&2
+                            echo "           winget install MikeFarah.yq" >&2
+                            ;;
                         sshpass)
                             echo "         sshpass has no native Windows package." >&2
                             echo "         Recommended: run this script in WSL instead of Git Bash:" >&2

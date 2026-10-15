@@ -27,9 +27,9 @@ This is *not* a tool to build any possible iteration of a network topology in AC
 If you don't have Brew installed, check this URL https://brew.sh/. 
 
 On your laptop:
-- `jq`, `sshpass`. Install the non-defaults with:
+- `jq`, `yq`. Install with:
   ```bash
-  brew install jq hudochenkov/sshpass/sshpass
+  brew install jq yq
   ```
 - (Optional) `graphviz` — if installed, `generate.sh` also emits a PNG
   diagram to upload with your topology file in ACT alongside the YAML:
@@ -39,16 +39,18 @@ On your laptop:
 
 ### PC Users 🪟
 
-Install graphviz and set your terminal to Git Bash in order for this to work:
+Install the following tools and set your terminal to Git Bash in order for this to work:
 
 1. Install `graphviz` in Powershell and add it to your path
    1. `winget install -e --id Graphviz.Graphviz`
    2. `export PATH=$PATH:"/c/Program Files/Graphviz/bin"`
-2. Install `jq` (required to SSH to ACT EOS devices)
+2. Install `jq`
    1. `winget install jqlang.jq`
-3. Open VS Code, in the terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
-4. Select **Git Bash** from the dropdown menu.
-5. Once the new terminal loads continue below. 
+3. Install `yq` (used by `act_topology.sh` to convert YAML → JSON for the ACT API)
+   1. `winget install MikeFarah.yq`
+4. Open VS Code, in the terminal panel, click the down arrow (v) next to the + (plus) icon in the top right.
+5. Select **Git Bash** from the dropdown menu.
+6. Once the new terminal loads continue below. 
 
 ### Create a new simple ACT Topology
 
@@ -56,8 +58,9 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 2. Open a terminal and move to that directory
 3. Run the `./generate.sh` script
 4. Answer the prompts to build a simple topology you can use in ACT
-5. Upload the generated topo file to ACT + deploy your topology in the ACT UI
-6. Wait for Running state
+5. Upload the generated topology with `./act_topology.sh <topology-file>`
+6. Choose whether `act_topology.sh` should create and deploy the lab, or do it
+   later in the ACT UI
 
 ```bash
 ./generate.sh
@@ -71,6 +74,23 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 #   Continue? [y/N] y
 #   Wrote topology-rclark-2026-09-15.yml
 #   Wrote topology-rclark-2026-09-15.png
+```
+
+Upload the generated YAML to the ACT account associated with your API key:
+
+```bash
+./act_topology.sh topology-rclark-2026-09-15.yml
+#   ACT tenant [ce]:
+#   ACT API key: ****  (36 chars)
+#   Topology name [topology-rclark-2026-09-15.yml]:
+#   Uploading topology 'topology-rclark-2026-09-15.yml' to ce.act.arista.com...
+#   topology creation: completed.
+#   Created ACT topology 'topology-rclark-2026-09-15.yml'.
+#   Create and deploy a lab from this topology? [y/N] y
+#   Lab name [topology-rclark-2026-09-15-lab]:
+#   lab creation: completed.
+#   lab deployment: completed.
+#   Deployed lab 'topology-rclark-2026-09-15-lab'.
 ```
 
 ### Once you created a lab (or you have one running) already
@@ -106,15 +126,16 @@ Install graphviz and set your terminal to Git Bash in order for this to work:
 
 ## How this works ⚙️
 
-Two scripts, run in order:
+Three scripts, run in order:
 
 | Step | Script | What it does |
 | ---- | ------ | ------------ |
 | 1 *(optional)* | `./generate.sh` | Interactively generates a topology YAML with **pinned `serial_number` + `system_mac_address`** on every node. Skip this step if you already have a topology — `onboard.sh` works with any vEOS topology, not just generated ones.  |
-| 2 | `./onboard.sh` | Finds your Running lab via the ACT API and SSH-pastes the TerminAttr onboarding snippet to every vEOS switch. Auto-detects the EOS password from the topology's `veos:` block, so it works with topologies you authored elsewhere. |
+| 2 | `./act_topology.sh` | Uploads a generated topology to ACT via the REST API. Optionally creates and deploys a lab from it. |
+| 3 | `./onboard.sh` | Finds your Running lab via the ACT API and SSH-pastes the TerminAttr onboarding snippet to every vEOS switch. Auto-detects the EOS password from the topology's `veos:` block, so it works with topologies you authored elsewhere. |
 
-Between the two (if you ran step 1): upload + deploy the generated
-topology in the ACT UI.
+When prompted, choose whether to create and deploy the lab immediately. If you
+decline, you can deploy the generated topology later in the ACT UI.
 
 No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 
@@ -124,7 +145,8 @@ No DHCP server. No ZTP. No bootstrap.py. No dedicated ztp-server node.
 | ---- | ------- |
 | `onboard.sh`  | Lists your Running labs and onboards every vEOS switch to CVaaS. |
 | `generate.sh` | *(optional)* Interactive topology generator with pinned serials + MACs. Asks for a serial prefix; caches spine/leaf counts, MLAG choice, and EOS version. |
-| `_common.sh`  | Shared helpers (prompt/cache/tool-check). Sourced by both scripts; don't run directly. |
+| `act_topology.sh` | Uploads a topology YAML to ACT and optionally creates + deploys a lab. Shares cached ACT credentials with `onboard.sh`. |
+| `_common.sh`  | Shared helpers (prompt/cache/tool-check). Sourced by the scripts; don't run directly. |
 | `topology-<prefix>-<YYYY-MM-DD>.yml` | Topology produced by `generate.sh`. Filename must be unique across the ACT tenant — `generate.sh` enforces the convention. |
 | `.config`     | Auto-generated cache of your answers. **gitignored.** Delete to re-prompt. |
 
@@ -137,7 +159,8 @@ When you want to change the topology:
    change spine/leaf counts as needed (the new file has today's date in
    its name, so it won't overwrite your previous labs). For
    hand-authored topologies, edit in place.
-2. Upload + deploy in the ACT UI. Either create a new lab or overwrite your existing.
+2. Run `./act_topology.sh <topology-file>` and accept the deployment prompt, or
+   deploy it later in the ACT UI.
 3. Run `./onboard.sh` and pick the new lab from the list.
 
 If the topology has pinned `serial_number` + `system_mac_address` on
@@ -193,8 +216,8 @@ settings:
 
 ## v2 / TODO
 
-- Drive ACT topology deploy / undeploy from the API directly (in progress
-  with a coworker's Python tooling) — would collapse steps 2 and 3 above.
+- Topology diagram upload via the ACT REST API (the `diagram_path` field
+  expects a server-side path; investigating with the ACT team).
 - Auto-generate the topology file from AVD configs (see
   [emilarista/act_topgen](https://github.com/emilarista/act_topgen)).
 - Parallelize the auto-paste ssh loop (currently serial — fine for ~6
