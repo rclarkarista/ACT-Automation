@@ -200,10 +200,11 @@ ssh_eos() {
 preflight_worker() {
     local host=$1 ip=$2
     local log="${LOG_DIR}/${host}.preflight.log"
-    ssh_eos "${ip}" <<EOSCHECK > "${log}" 2>&1
+    ( ssh_eos "${ip}" <<EOSCHECK > "${log}" 2>&1
 enable
 bash curl --connect-timeout 5 -sS -o /dev/null https://${CVAAS_HOST}:${CVAAS_PORT}/ && echo CVAAS_OK
 EOSCHECK
+    ) || true
     if grep -q "CVAAS_OK" "${log}"; then
         printf "  %-30s  %-16s  reachable\n" "${host}" "${ip}"
     else
@@ -439,43 +440,40 @@ if [[ -z "${DEVICES}" ]]; then
 fi
 
 ###############################################################################
-# pull the topology YAML once and use it for two things:
-#   1. resolve the EOS password from the `veos:` block
-#   2. filter ${DEVICES} down to only nodes with `node_type: veos`
-#      (so CVP / Linux / third-party nodes never get a token paste attempt)
+# Fetch the topology from the ACT API — the source of truth for running labs.
+# Used for two things:
+#   1. resolve the EOS password from the veos block
+#   2. filter ${DEVICES} down to only nodes with node_type: veos
 #
-# YAML sources tried in order:
-#   - local file at ${PROJECT_DIR}/<topology_definition>  (fastest, no API)
-#   - ACT API /topologies/<topology_definition>           (works for shared labs)
+# The API stores the topology content as a JSON object (YAML parsed at upload
+# time), so we query it with jq rather than the YAML awk parsers.
 ###############################################################################
 TOPO_NAME=$(jq -r '.topology_definition // empty' <<< "${LAB_RESP}")
 [[ -z "${TOPO_NAME}" ]] && TOPO_NAME="${RUNNING_TOPOS[choice-1]:-}"
 
-TOPO_YAML=""
-TOPO_SOURCE=""
-if [[ -n "${TOPO_NAME}" && -f "${PROJECT_DIR}/${TOPO_NAME}" ]]; then
-    TOPO_YAML=$(cat "${PROJECT_DIR}/${TOPO_NAME}")
-    TOPO_SOURCE="local ${TOPO_NAME}"
-elif [[ -n "${TOPO_NAME}" ]]; then
-    # ACT API endpoint is a best-guess; some tenants wrap YAML in JSON.
-    TOPO_RESP=$(curl -sk "${API_BASE}/topologies/${TOPO_NAME}" \
+TOPO_JSON=""
+if [[ -n "${TOPO_NAME}" ]]; then
+    echo "Fetching topology '${TOPO_NAME}' from ACT API..."
+    TOPO_SEARCH=$(curl -sk "${API_BASE}/topologies?topology_pathname=${TOPO_NAME}&pageSize=1" \
         -H "Authorization: Bearer ${TOKEN}" 2>/dev/null || true)
-    if [[ -n "${TOPO_RESP}" ]]; then
-        content=$(jq -r '.content // .data // empty' <<< "${TOPO_RESP}" 2>/dev/null || true)
-        [[ -z "${content}" || "${content}" == "null" ]] && content="${TOPO_RESP}"
-        if [[ -n "${content}" ]]; then
-            TOPO_YAML="${content}"
-            TOPO_SOURCE="ACT API (${TOPO_NAME})"
-        fi
+    TOPO_ID=$(jq -r '.result[0].id // empty' <<< "${TOPO_SEARCH}" 2>/dev/null || true)
+
+    if [[ -n "${TOPO_ID}" ]]; then
+        TOPO_DETAIL=$(curl -sk "${API_BASE}/topologies/${TOPO_ID}" \
+            -H "Authorization: Bearer ${TOKEN}" 2>/dev/null || true)
+        TOPO_JSON=$(jq '.topology // .file // empty' \
+            <<< "${TOPO_DETAIL}" 2>/dev/null || true)
+        [[ -z "${TOPO_JSON}" || "${TOPO_JSON}" == "null" ]] && TOPO_JSON=""
     fi
+
 fi
 
-# EOS password
-if [[ -n "${TOPO_YAML}" ]]; then
-    EOS_PASS=$(extract_veos_password <<< "${TOPO_YAML}")
+# EOS password — from ACT topology, else default
+if [[ -n "${TOPO_JSON}" ]]; then
+    EOS_PASS=$(jq -r '.veos.password // empty' <<< "${TOPO_JSON}" 2>/dev/null || true)
 fi
 if [[ -n "${EOS_PASS}" ]]; then
-    echo "EOS password: from ${TOPO_SOURCE}"
+    echo "EOS password: from ACT topology (${TOPO_NAME})"
 else
     EOS_PASS="${EOS_PASS_DEFAULT}"
     echo "EOS password: could not auto-detect from topology; defaulting to ${EOS_PASS_DEFAULT}"
@@ -496,11 +494,18 @@ ASKEOF
     echo "Note: sshpass not found; using built-in SSH_ASKPASS fallback (no extra install needed)."
 fi
 
-# Filter ${DEVICES} to only nodes the topology declares as `node_type: veos`.
-# We only apply this filter when we actually have the YAML — otherwise we trust
-# the API's `.devices.veos[]` filter as-is rather than dropping everything.
-if [[ -n "${TOPO_YAML}" ]]; then
-    VEOS_NAMES=$(extract_veos_hostnames <<< "${TOPO_YAML}")
+# Filter ${DEVICES} to only nodes the topology declares as node_type: veos.
+# The API returns the topology content as JSON, so we use jq to extract the
+# veos hostnames. If the API didn't return topology data, trust the API's
+# .devices.veos[] list as-is.
+if [[ -n "${TOPO_JSON}" ]]; then
+    VEOS_NAMES=$(jq -r '
+        .nodes[]
+        | to_entries[]
+        | select(.value.node_type == "veos")
+        | .key
+    ' <<< "${TOPO_JSON}" 2>/dev/null || true)
+
     if [[ -n "${VEOS_NAMES}" ]]; then
         SKIPPED=()
         NEW_DEVICES=""
@@ -531,8 +536,8 @@ while IFS=$'\t' read -r host ip; do
     printf "  %-12s  %s\n" "${host}" "${ip}"
 done <<< "${DEVICES}"
 echo
-read -r -p "Continue? [y/N] " ans
-case "${ans}" in [Yy]*) ;; *) echo "Aborted."; exit 1 ;; esac
+read -r -p "Continue? [Y/n] " ans
+case "${ans}" in [Nn]*) echo "Aborted."; exit 1 ;; esac
 
 # All three phases write per-device logs here. Created once, reused across
 # the run so the user can grep into any single device's history.
