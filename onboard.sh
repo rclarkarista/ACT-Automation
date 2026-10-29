@@ -28,7 +28,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
 DEFAULT_ACT_TENANT="ce"
 
 # EOS CLI credentials.
-# - EOS_USER is always cvpadmin (every topology in this toolkit uses it).
+# - EOS_USER defaults to cvpadmin but is overridden from the ACT topology.
 # - EOS_PASS is resolved per-lab from the topology's `veos:` block (see
 #   resolve_eos_password() further down), with cvp123! as the final fallback.
 #   This lets us onboard topologies that came from elsewhere and happen to
@@ -468,15 +468,17 @@ if [[ -n "${TOPO_NAME}" ]]; then
 
 fi
 
-# EOS password — from ACT topology, else default
+# EOS credentials — from ACT topology, else defaults
 if [[ -n "${TOPO_JSON}" ]]; then
+    EOS_USER=$(jq -r '.veos.username // empty' <<< "${TOPO_JSON}" 2>/dev/null || true)
     EOS_PASS=$(jq -r '.veos.password // empty' <<< "${TOPO_JSON}" 2>/dev/null || true)
 fi
+[[ -z "${EOS_USER}" ]] && EOS_USER="cvpadmin"
 if [[ -n "${EOS_PASS}" ]]; then
-    echo "EOS password: from ACT topology (${TOPO_NAME})"
+    echo "EOS credentials: from ACT topology (${TOPO_NAME}) — user=${EOS_USER}"
 else
     EOS_PASS="${EOS_PASS_DEFAULT}"
-    echo "EOS password: could not auto-detect from topology; defaulting to ${EOS_PASS_DEFAULT}"
+    echo "EOS credentials: could not auto-detect from topology; defaulting to ${EOS_USER}/${EOS_PASS_DEFAULT}"
 fi
 
 # When sshpass is not installed (common on Windows / Git Bash), create a
