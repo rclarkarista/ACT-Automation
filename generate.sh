@@ -33,6 +33,18 @@ MAX_TOTAL_MEMBER_LEAVES_MULTI=12   # multi-DC: per-DC IP block has room for 12
 DC_LETTERS=(A B C D)
 
 ###############################################################################
+# generate_mac <hostname>
+#   Derive a deterministic, unique MAC from the SERIAL_PREFIX + hostname.
+#   Keeps the Arista OUI (00:1c:73) and hashes the rest so different users
+#   get different MACs while re-generating the same topology stays stable.
+###############################################################################
+generate_mac() {
+    local hash
+    hash=$(printf '%s' "${SERIAL_PREFIX}-$1" | shasum -a 256 | cut -c1-6)
+    printf '00:1c:73:%s:%s:%s' "${hash:0:2}" "${hash:2:2}" "${hash:4:2}"
+}
+
+###############################################################################
 # load_params_from_topology_file <yaml-file>
 #   Parse a generate.sh-produced topology YAML and populate:
 #     HOSTNAME_PREFIX, SPINE_COUNT, LEAF_COUNT, MLAG_PAIRS, EOS_VERSION,
@@ -194,7 +206,7 @@ fi
 # is the default; when creating new, the serial prefix is. Always re-prompt
 # so the user can change it either way.
 prompt_with_current HOSTNAME_PREFIX "Hostname prefix" "${SERIAL_PREFIX}"
-prompt_with_current DC_COUNT        "Number of datacenters/campuses (1-${MAX_DC})" "1"
+prompt_with_current DC_COUNT        "Number of sites (1-${MAX_DC})" "1"
 
 TODAY="$(date +%Y-%m-%d)"
 if [[ -n "${EXISTING_FILE}" ]]; then
@@ -206,7 +218,7 @@ OUT_NAME="${OUT_FILE##*/}"
 
 # Validate DC_COUNT first — it affects the limits for subsequent params.
 if ! [[ "${DC_COUNT}" =~ ^[1-${MAX_DC}]$ ]]; then
-    echo "ERROR: datacenter count must be 1-${MAX_DC}, got '${DC_COUNT}'." >&2
+    echo "ERROR: site count must be 1-${MAX_DC}, got '${DC_COUNT}'." >&2
     exit 1
 fi
 
@@ -217,8 +229,8 @@ if (( DC_COUNT > 1 )); then
 fi
 
 if (( DC_COUNT > 1 )); then
-    prompt_with_current SPINE_COUNT "Spines per DC"                         "${DEFAULT_SPINES}"
-    prompt_with_current LEAF_COUNT  "Leaves per DC"                         "${DEFAULT_LEAVES}"
+    prompt_with_current SPINE_COUNT "Spines per site"                        "${DEFAULT_SPINES}"
+    prompt_with_current LEAF_COUNT  "Leaves per site"                        "${DEFAULT_LEAVES}"
 else
     prompt_with_current SPINE_COUNT "Number of spines"                      "${DEFAULT_SPINES}"
     prompt_with_current LEAF_COUNT  "Number of leaves"                      "${DEFAULT_LEAVES}"
@@ -276,6 +288,21 @@ if [[ "${MLAG_PAIRS}" == "y" ]]; then
 else
     MEMBER_LEAF_PAIRS=""
     MEMBER_LEAVES_PER_PAIR=""
+fi
+
+SPINE_MLAG=0
+SPINE_MLAG_SITES=""
+if (( SPINE_COUNT == 2 )); then
+    if (( DC_COUNT == 1 )); then
+        read -r -p "  Add MLAG peer-links between spines? [Y/n] " _spine_mlag_ans
+        case "${_spine_mlag_ans}" in [Nn]*) ;; *) SPINE_MLAG=1 ;; esac
+    else
+        for (( _d=0; _d<DC_COUNT; _d++ )); do
+            _L="${DC_LETTERS[_d]}"
+            read -r -p "  Add MLAG peer-links for Site ${_L} spines? [Y/n] " _spine_mlag_ans
+            case "${_spine_mlag_ans}" in [Nn]*) ;; *) SPINE_MLAG_SITES+="${_L}" ;; esac
+        done
+    fi
 fi
 
 prompt_with_current EOS_VERSION "EOS version" "${DEFAULT_EOS_VERSION}"
@@ -346,6 +373,13 @@ if [[ "${MLAG_PAIRS}" == "y" ]]; then
         mlag_note=", MLAG-paired leaves"
     fi
 fi
+if (( SPINE_MLAG )) || [[ -n "${SPINE_MLAG_SITES}" ]]; then
+    if (( DC_COUNT == 1 )); then
+        mlag_note+=", MLAG-paired spines"
+    else
+        mlag_note+=", MLAG-paired spines (sites ${SPINE_MLAG_SITES})"
+    fi
+fi
 
 member_note=""
 if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
@@ -359,7 +393,7 @@ else
     echo "Will write ${OUT_NAME}"
 fi
 if (( DC_COUNT > 1 )); then
-    echo "  ${DC_COUNT} datacenter(s), ${SPINE_COUNT} spine(s)/DC, ${LEAF_COUNT} leaf/leaves/DC, 2 border leaves/DC, 2 backbone routers${member_note}, EOS ${EOS_VERSION}, full mesh${mlag_note}"
+    echo "  ${DC_COUNT} site(s), ${SPINE_COUNT} spine(s)/site, ${LEAF_COUNT} leaf/leaves/site, 2 border leaves/site, 2 backbone routers${member_note}, EOS ${EOS_VERSION}, full mesh${mlag_note}"
 else
     echo "  ${SPINE_COUNT} spine(s), ${LEAF_COUNT} leaf/leaves${member_note}, EOS ${EOS_VERSION}, full mesh${mlag_note}"
 fi
@@ -420,7 +454,7 @@ if (( DC_COUNT == 1 )); then
       node_type: veos
       ip_addr: 192.168.0.$((10 + i))/24
       serial_number: ${SERIAL_PREFIX}-spine${i}
-      system_mac_address: 00:1c:73:00:01:$(printf '%02x' "${i}")
+      system_mac_address: $(generate_mac "spine${i}")
       ztp: false
 NODE
         done
@@ -437,7 +471,7 @@ NODE
       node_type: veos
       ip_addr: 192.168.0.$((20 + i))/24
       serial_number: ${SERIAL_PREFIX}-leaf${i}
-      system_mac_address: 00:1c:73:00:02:$(printf '%02x' "${i}")
+      system_mac_address: $(generate_mac "leaf${i}")
       ztp: false
 NODE
         done
@@ -457,7 +491,7 @@ NODE
       node_type: veos
       ip_addr: 192.168.0.$((130 + mleaf_idx))/24
       serial_number: ${SERIAL_PREFIX}-mleaf${mleaf_idx}
-      system_mac_address: 00:1c:73:00:03:$(printf '%02x' "${mleaf_idx}")
+      system_mac_address: $(generate_mac "mleaf${mleaf_idx}")
       ztp: false
 NODE
                 done
@@ -507,6 +541,15 @@ LINKHEADER
             done
         fi
 
+        if (( SPINE_MLAG )); then
+            spine_mlag_a=$((LEAF_COUNT + 1))
+            spine_mlag_b=$((LEAF_COUNT + 2))
+            echo ""
+            echo "  # Spine MLAG peer links"
+            echo "  - connection: [${HOSTNAME_PREFIX}-spine1:Ethernet${spine_mlag_a}, ${HOSTNAME_PREFIX}-spine2:Ethernet${spine_mlag_a}]"
+            echo "  - connection: [${HOSTNAME_PREFIX}-spine1:Ethernet${spine_mlag_b}, ${HOSTNAME_PREFIX}-spine2:Ethernet${spine_mlag_b}]"
+        fi
+
         if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
             echo ""
             echo "  # Member-leaf uplinks"
@@ -544,7 +587,7 @@ else
       node_type: veos
       ip_addr: 192.168.0.$((1 + n))/24
       serial_number: ${SERIAL_PREFIX}-bb${n}
-      system_mac_address: 00:1c:73:00:05:$(printf '%02x' "${n}")
+      system_mac_address: $(generate_mac "bb${n}")
       ztp: false
 NODE
         done
@@ -553,12 +596,11 @@ NODE
         for (( d=0; d<DC_COUNT; d++ )); do
             L="${DC_LETTERS[d]}"
             base=$((4 + d * 62))
-            dc_mac_octet=$(printf '%02x' "$((d + 1))")
 
             # Border leaves
             echo ""
             echo "  ###########################################################################"
-            echo "  # Datacenter ${L} — Border leaves"
+            echo "  # Site ${L} — Border leaves"
             echo "  ###########################################################################"
 
             for (( b=1; b<=2; b++ )); do
@@ -568,7 +610,7 @@ NODE
       node_type: veos
       ip_addr: 192.168.0.$((base + b - 1))/24
       serial_number: ${SERIAL_PREFIX}-${L}-border${b}
-      system_mac_address: 00:1c:73:${dc_mac_octet}:04:$(printf '%02x' "${b}")
+      system_mac_address: $(generate_mac "${L}-border${b}")
       ztp: false
 NODE
             done
@@ -576,7 +618,7 @@ NODE
             # Spines
             echo ""
             echo "  ###########################################################################"
-            echo "  # Datacenter ${L} — Spines"
+            echo "  # Site ${L} — Spines"
             echo "  ###########################################################################"
 
             for (( i=1; i<=SPINE_COUNT; i++ )); do
@@ -586,7 +628,7 @@ NODE
       node_type: veos
       ip_addr: 192.168.0.$((base + 2 + i - 1))/24
       serial_number: ${SERIAL_PREFIX}-${L}-spine${i}
-      system_mac_address: 00:1c:73:${dc_mac_octet}:01:$(printf '%02x' "${i}")
+      system_mac_address: $(generate_mac "${L}-spine${i}")
       ztp: false
 NODE
             done
@@ -594,7 +636,7 @@ NODE
             # Leaves
             echo ""
             echo "  ###########################################################################"
-            echo "  # Datacenter ${L} — Leaves"
+            echo "  # Site ${L} — Leaves"
             echo "  ###########################################################################"
 
             for (( i=1; i<=LEAF_COUNT; i++ )); do
@@ -604,7 +646,7 @@ NODE
       node_type: veos
       ip_addr: 192.168.0.$((base + 11 + i - 1))/24
       serial_number: ${SERIAL_PREFIX}-${L}-leaf${i}
-      system_mac_address: 00:1c:73:${dc_mac_octet}:02:$(printf '%02x' "${i}")
+      system_mac_address: $(generate_mac "${L}-leaf${i}")
       ztp: false
 NODE
             done
@@ -613,7 +655,7 @@ NODE
             if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
                 echo ""
                 echo "  ###########################################################################"
-                echo "  # Datacenter ${L} — Member leaves"
+                echo "  # Site ${L} — Member leaves"
                 echo "  ###########################################################################"
                 mleaf_idx=0
                 for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
@@ -625,7 +667,7 @@ NODE
       node_type: veos
       ip_addr: 192.168.0.$((base + 50 + mleaf_idx - 1))/24
       serial_number: ${SERIAL_PREFIX}-${L}-mleaf${mleaf_idx}
-      system_mac_address: 00:1c:73:${dc_mac_octet}:03:$(printf '%02x' "${mleaf_idx}")
+      system_mac_address: $(generate_mac "${L}-mleaf${mleaf_idx}")
       ztp: false
 NODE
                     done
@@ -648,7 +690,7 @@ LINKHEADER
 
             # Spine <-> leaf full mesh
             echo ""
-            echo "  # Datacenter ${L} — spine <-> leaf full mesh"
+            echo "  # Site ${L} — spine <-> leaf full mesh"
             for (( s=1; s<=SPINE_COUNT; s++ )); do
                 for (( l=1; l<=LEAF_COUNT; l++ )); do
                     echo "  - connection: [${HOSTNAME_PREFIX}-${L}-spine${s}:Ethernet${l}, ${HOSTNAME_PREFIX}-${L}-leaf${l}:Ethernet${s}]"
@@ -660,7 +702,7 @@ LINKHEADER
                 mlag_port_a=$((SPINE_COUNT + 1))
                 mlag_port_b=$((SPINE_COUNT + 2))
                 echo ""
-                echo "  # Datacenter ${L} — leaf MLAG peer links"
+                echo "  # Site ${L} — leaf MLAG peer links"
                 for (( i=1; i<LEAF_COUNT; i+=2 )); do
                     j=$((i + 1))
                     echo "  - connection: [${HOSTNAME_PREFIX}-${L}-leaf${i}:Ethernet${mlag_port_a}, ${HOSTNAME_PREFIX}-${L}-leaf${j}:Ethernet${mlag_port_a}]"
@@ -671,7 +713,7 @@ LINKHEADER
             # Member-leaf uplinks
             if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
                 echo ""
-                echo "  # Datacenter ${L} — member-leaf uplinks"
+                echo "  # Site ${L} — member-leaf uplinks"
                 mleaf_idx=0
                 for pair in "${MEMBER_LEAF_PAIRS_ARRAY[@]}"; do
                     odd=$((2 * pair - 1))
@@ -687,7 +729,7 @@ LINKHEADER
 
             # Border <-> spine links
             echo ""
-            echo "  # Datacenter ${L} — border <-> spine"
+            echo "  # Site ${L} — border <-> spine"
             for (( s=1; s<=SPINE_COUNT; s++ )); do
                 echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${s}, ${HOSTNAME_PREFIX}-${L}-spine${s}:Ethernet$((LEAF_COUNT + 1))]"
                 echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border2:Ethernet${s}, ${HOSTNAME_PREFIX}-${L}-spine${s}:Ethernet$((LEAF_COUNT + 2))]"
@@ -697,9 +739,19 @@ LINKHEADER
             bl_mlag_a=$((SPINE_COUNT + 1))
             bl_mlag_b=$((SPINE_COUNT + 2))
             echo ""
-            echo "  # Datacenter ${L} — border MLAG peer"
+            echo "  # Site ${L} — border MLAG peer"
             echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${bl_mlag_a}, ${HOSTNAME_PREFIX}-${L}-border2:Ethernet${bl_mlag_a}]"
             echo "  - connection: [${HOSTNAME_PREFIX}-${L}-border1:Ethernet${bl_mlag_b}, ${HOSTNAME_PREFIX}-${L}-border2:Ethernet${bl_mlag_b}]"
+
+            # Spine MLAG peer links (per-site opt-in)
+            if [[ "${SPINE_MLAG_SITES}" == *"${L}"* ]]; then
+                spine_mlag_a=$((LEAF_COUNT + 3))
+                spine_mlag_b=$((LEAF_COUNT + 4))
+                echo ""
+                echo "  # Site ${L} — spine MLAG peer links"
+                echo "  - connection: [${HOSTNAME_PREFIX}-${L}-spine1:Ethernet${spine_mlag_a}, ${HOSTNAME_PREFIX}-${L}-spine2:Ethernet${spine_mlag_a}]"
+                echo "  - connection: [${HOSTNAME_PREFIX}-${L}-spine1:Ethernet${spine_mlag_b}, ${HOSTNAME_PREFIX}-${L}-spine2:Ethernet${spine_mlag_b}]"
+            fi
         done
 
         # Backbone interconnect — border <-> backbone
@@ -794,6 +846,11 @@ if command -v dot >/dev/null 2>&1; then
             done
         fi
 
+        if (( SPINE_MLAG )); then
+            echo ''
+            echo "  spine1 -> spine2 [style=dashed, color=\"#dc2626\", penwidth=2, constraint=false];"
+        fi
+
         if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
             echo ''
             local mleaf_idx=0
@@ -812,7 +869,7 @@ if command -v dot >/dev/null 2>&1; then
     }
 
     generate_dot_multi_dc() {
-        local diagram_title="${SERIAL_PREFIX}: ${DC_COUNT} DC × (${SPINE_COUNT} spine × ${LEAF_COUNT} leaf"
+        local diagram_title="${SERIAL_PREFIX}: ${DC_COUNT} site × (${SPINE_COUNT} spine × ${LEAF_COUNT} leaf"
         [[ "${MLAG_PAIRS}" == "y" ]] && diagram_title+=" MLAG"
         diagram_title+=") + backbone"
 
@@ -838,7 +895,7 @@ if command -v dot >/dev/null 2>&1; then
             local base=$((4 + d * 62))
 
             echo "  subgraph cluster_${L} {"
-            echo "    label=\"Datacenter ${L}\"; style=\"rounded,dashed\"; color=\"#6b7280\";"
+            echo "    label=\"Site ${L}\"; style=\"rounded,dashed\"; color=\"#6b7280\";"
             echo "    fontname=\"Helvetica-Bold\"; fontsize=13; margin=12;"
             echo ''
 
@@ -904,6 +961,11 @@ if command -v dot >/dev/null 2>&1; then
 
             # Border MLAG peer
             echo "    ${L}_border1 -> ${L}_border2 [style=dashed, color=\"#dc2626\", penwidth=1.5, constraint=false];"
+
+            # Spine MLAG peer
+            if [[ "${SPINE_MLAG_SITES}" == *"${L}"* ]]; then
+                echo "    ${L}_spine1 -> ${L}_spine2 [style=dashed, color=\"#dc2626\", penwidth=1.5, constraint=false];"
+            fi
 
             # Member-leaf uplinks
             if [[ -n "${MEMBER_LEAF_PAIRS}" ]]; then
