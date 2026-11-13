@@ -9,3 +9,4 @@ ACT Automation.code-workspace
 
 # Any topology files
 topology*
+*.yml
